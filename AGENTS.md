@@ -126,6 +126,7 @@ Tools are one-off CLI utilities outside the scorer/run cycle. Pattern: create `b
 
 ## 5. Gotchas
 
+- **V2 model runner is preferred on gfx1030.**
 - **Pydantic v2 discriminated union syntax**: use `Annotated[Union[A, B, ...], Field(discriminator="kind")]`. The literal value of `kind` selects the right subclass at validation time.
 - **`/v1/completions` vs `/v1/chat/completions`**: OpenAI does NOT expose per-token logprobs on chat. Perplexity and KLD scorers must hit the completions endpoint. vLLM and most OpenAI-compatible servers support it; llama.cpp server exposes it as well.
 - **Cross-tokenizer KLD is meaningless.** `kl_divergence.py` refuses to run if `manifest.vocab_size` ≠ endpoint tokenizer vocab size. To override, set `vocab_check: false` in the scorer config — but you'll get garbage numbers if the tokenizers really differ.
