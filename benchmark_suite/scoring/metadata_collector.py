@@ -1,7 +1,7 @@
 """benchmark_suite/scoring/metadata_collector.py — hardware/software/model context.
 
 Gathers the metadata that accompanies a leaderboard submission, matching the
-`benchmark_suite_leaderboard` repo's `schema/metadata.schema.json`. Every
+`uncoolred_bench` repo's `schema/metadata.schema.json`. Every
 collector is best-effort: it never raises, and missing keys are simply absent
 from the returned dict (the schema treats absent keys as "unknown", which is
 valid — just unhelpful).
