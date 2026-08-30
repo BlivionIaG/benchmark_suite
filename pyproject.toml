@@ -39,3 +39,8 @@ addopts = "-q"
 
 [tool.uv]
 package = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["benchmark_suite*"]
+exclude = ["recipes*", "tests*", "docs*", "schema*"]
