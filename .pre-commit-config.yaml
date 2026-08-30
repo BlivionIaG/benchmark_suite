@@ -1,0 +1,26 @@
+repos:
+  - repo: local
+    hooks:
+      - id: basedpyright
+        name: basedpyright (strict)
+        entry: uv run basedpyright benchmark_suite/
+        language: system
+        pass_filenames: false
+        additional_dependencies:
+          - "basedpyright==1.39.10"
+      - id: check-merge-conflict
+        name: check-merge-conflict
+        entry: grep -q "<<<<<<< \|======= \|>>>>>>> " || exit 0
+        language: system
+        pass_filenames: true
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.5
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format

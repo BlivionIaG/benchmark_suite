@@ -1,0 +1,12 @@
+results/
+.venv/
+__pycache__/
+*.pyc
+dist/
+*.egg-info
+.triton/
+.cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+uv.lock
