@@ -36,6 +36,14 @@ uv sync --all-extras          # everything
 # Optional: install llm-perf from source (Rust toolchain required)
 cargo install --git https://github.com/iopsystems/llm-perf --tag v0.1.16
 
+# Required for `bs submit`: install the LocalMaxxing CLI (`lmx`)
+# Either download a release binary or `go install` from source.
+base=https://github.com/LottoLottoLotto/localmaxxing-cli/releases/latest/download
+curl -fsSLO "$base/lmx-linux-amd64.tar.gz"   # or darwin-arm64 / windows-amd64
+tar -xzf lmx-linux-amd64.tar.gz
+sudo mv lmx /usr/local/bin/
+lmx --version
+
 # Verify
 uv run bs version
 ```
@@ -49,6 +57,7 @@ benchmark_suite/
 ├── __init__.py             # __version__
 ├── cli.py                  # typer app — `bs` entry point (ALL commands)
 ├── recipe.py               # Pydantic v2 schema — Recipe, scorer configs, load_recipe
+├── submission.py           # build_lmx_payload + submit_submission + export_payload
 ├── paths.py                # result-dir layout helpers, ts_slug
 ├── _matrix.py              # private — cartesian axis expansion for `bs matrix`
 ├── runner/
@@ -71,7 +80,10 @@ benchmark_suite/
 recipes/                    # YAML recipe library (4 shipped)
 tests/
 ├── conftest.py             # top-level pytest fixtures
-├── test_recipe.py, test_paths.py, test_matrix.py   # schema tests
+├── test_recipe.py          # schema tests (incl. HardwareSection)
+├── test_paths.py, test_matrix.py
+├── test_export.py          # metadata_collector + build_lmx_payload + export_payload
+├── test_submit.py          # respx-mocked POST /api/speed-tests + dry-run
 ├── test_cli.py, test_compare.py, test_report.py    # integration tests
 ├── runner/                 # endpoint + serve + llm_perf + vllm_bench tests
 ├── scoring/                # per-scorer tests
@@ -81,9 +93,11 @@ tests/
 ### Key contracts (don't break these)
 
 - **`recipe.py` schema is the API.** Every scorer config uses Pydantic v2 discriminated union on `kind`. Schema changes require updating PLAN.md + all recipes.
+- **`hardware:` and `quantization:` blocks in the recipe are required for `bs submit`.** `hardware.is_complete()` returns True only when `model`, `vram_gb > 0`, and `count > 0` are all set. The validator sets `quantization="FP16"` automatically when `resources.dtype="float16"` and the user hasn't overridden it; for any other dtype, set it explicitly.
 - **legacy summary.csv columns stay byte-for-byte.** Defined as `SUMMARY_CSV_COLUMNS` in `report.py`. Originally from parent's `benchmark_results/parse_matrix_results.py`. Adding a column is fine; renaming/removing breaks downstream tooling.
 - **Cell-id format**: `{family}_{attn}_{linear}_cg{cg}_mtp{mtp}[_extra...]` (e.g. `dense_fardna2_rdna2_cg1_mtp2`). Rendered by `CellId.render()` in `recipe.py`. Convention from parent project.
 - **No torch in scorer hot path.** `kl_divergence.py` uses numpy + safetensors only. `torch` is gated to `tools/convert_kl_logits.py`.
+- **`submission.py` API surface:** `build_lmx_payload(result_dir, recipe=None, notes="") -> dict`, `submit_submission(result_dir, lmx_bin, endpoint, notes, dry_run) -> SubmitResult`, `export_payload(result_dir, output, notes) -> Path`, `find_lmx(explicit) -> str`. The submission flow shells out to the official `lmx` CLI — `bs` does not make HTTP calls directly.
 
 ## 4. Common tasks
 
@@ -106,9 +120,11 @@ tests/
 
 1. Copy `recipes/qwen36-27b-gptq-tp4.yaml` (or the closest match).
 2. Edit `meta.name` (must be unique slug — `^[a-z0-9][a-z0-9_-]*$`), `meta.description`, `backend.model_path`, `endpoint.url`, `resources.*`, `cell.*`.
-3. Keep `cell.{family,attn,linear,cg,mtp}` aligned with the model architecture (e.g. MoE → `family: moe`).
-4. Verify: `uv run bs doctor recipes/<new>.yaml --dry-run` exits 0.
-5. Run the recipe-validation test: `uv run pytest tests/test_recipes.py -v` (auto-discovers all `recipes/*.yaml`).
+3. Fill in `hardware:` with `vendor`, `model`, `count`, `vram_gb` (required for `bs submit`); `cpu`, `ram_gb`, `os`, `power_watts` are optional but recommended. For external-endpoint recipes, use `vendor: other`, leave `count: 0`, `vram_gb: 0`.
+4. Set `quantization:` (e.g. `W4A16-G32`, `AWQ-INT4`, `EXL3-3bpw`, `FP16`). Default is `FP16` for `dtype: float16`; explicit for everything else.
+5. Keep `cell.{family,attn,linear,cg,mtp}` aligned with the model architecture (e.g. MoE → `family: moe`).
+6. Verify: `uv run bs doctor recipes/<new>.yaml --dry-run` exits 0.
+7. Run the recipe-validation test: `uv run pytest tests/test_recipes.py -v` (auto-discovers all `recipes/*.yaml`).
 
 ### Modify the recipe schema
 
@@ -202,10 +218,89 @@ Before each commit:
 - [ ] Commit message follows Rule 2 format (What / Why / Testing body)
 - [ ] `git push origin master` after commit
 
-## 10. Validation status (v1)
+## 10. Submitting to localmaxxing.com (`bs submit`, `bs export`)
 
-- 182 tests passing
+`benchmark_suite` is a recipe + result-dir automation layer. The actual leaderboard submission is delegated to the official [LocalMaxxing CLI (`lmx`)](https://github.com/LottoLottoLotto/localmaxxing-cli).
+
+`bs submit` builds the JSON payload that `lmx speed-test submit` consumes, writes it to a temp file, and shells out:
+
+```bash
+lmx speed-test submit /tmp/bs-submit-XXX.json   # or dry-run
+```
+
+`bs` does **not** make HTTP calls. Authentication, retries, rate-limit handling, and response parsing are all `lmx`'s job — we just feed it JSON.
+
+### Flow
+
+1. `summary.json` (from `bs run`) is read for `recipe` + `scores[throughput].metrics`.
+2. `build_lmx_payload()` maps:
+   - `hardware:` → `hardware` field (`hwClass: DISCRETE_GPU`)
+   - `quantization:` → `quantization` (defaults to `FP16` for `dtype: float16`)
+   - `backend.type` → `engineName` (`vllm` / `llama.cpp` / `tgi` / `external`)
+   - `cell.render()` → `engineFlags.cellId` (preserves parent project's cell-id convention)
+   - `output_tok_s`, `ttft_mean_ms`, `input_tok_s`, `peak_vram_gb` → `tokSOut`/`ttftMs`/`tokSPrefill`/`peakVramGb`
+3. Payload is written to a temp file (`/tmp/bs-submit-XXXX.json`).
+4. `lmx` is invoked via `subprocess.run([lmx_path, "speed-test", "submit"|"dry-run", tmp_path], ...)`.
+5. Exit code 0 → parse stdout for the run ID + URL via regex.
+6. Exit code non-zero → return `error="lmx_failed"` with stderr.
+
+### Required: install `lmx`
+
+```bash
+# Linux (amd64)
+curl -fsSLO https://github.com/LottoLottoLotto/localmaxxing-cli/releases/latest/download/lmx-linux-amd64.tar.gz
+tar -xzf lmx-linux-amd64.tar.gz && sudo mv lmx /usr/local/bin/
+
+# Or: go install github.com/LottoLottoLotto/localmaxxing-cli/cmd/lmx@latest
+
+lmx --version
+```
+
+### Authentication (handled by `lmx`)
+
+```bash
+export LMX_API_KEY=bhk_...        # env var (preferred for agents/CI)
+lmx auth login                    # interactive device-flow login
+printf '%s\n' "$LMX_API_KEY" | lmx auth --key-stdin   # safe (no shell history)
+```
+
+`bs submit` does not accept or pass an API key. It shells out to `lmx` and lets `lmx` read the key from `$LMX_API_KEY` or `~/.config/localmaxxing/config.json`.
+
+### CLI flags
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--lmx-bin <path>` | `$PATH` lookup | Path to the `lmx` binary (when not on `$PATH`). |
+| `--endpoint` / `-e` | lmx's built-in default | Override the localmaxxing base URL (passed as `--api-url` to lmx). |
+| `--notes` / `-n` | `""` | Free-form notes (max 2000 chars). |
+| `--dry-run` | `False` | Use `lmx speed-test dry-run` instead of `submit`. No rate-limit consumption, no write. |
+
+### Result fields
+
+`SubmitResult` (TypedDict):
+- `submission_id` + `public_url` + `lmx_exit_code` (live submit success)
+- `dry_run_valid` + `dry_run_stdout` (dry-run success)
+- `error="lmx_failed"` + `details` + `lmx_stdout` + `lmx_stderr` + `lmx_exit_code` (lmx rejected payload)
+- `lmx_not_found=True` + `error="lmx_not_found"` + install instructions in `details`
+
+The CLI parses `lmx`'s stdout with a regex (`https?://[^\s]*?/speed-tests/([A-Za-z0-9_-]+)`); if that fails, falls back to `(?:id|submission_id|run_id)[:\s]+([A-Za-z0-9_-]+)`. The URL pattern matches the one lmx prints; the ID fallback handles non-default output formats.
+
+### Gotchas
+
+- **`backend.model_path` should be a HuggingFace ID (`org/name`).** Absolute local paths fall back to the last path segment; lmx may reject non-existent HF models on dry-run with a 404.
+- **`hardware.is_complete()` is required.** `bs submit` raises `ValueError("no output_tok_s...")` when the recipe lacks `model`/`vram_gb`/`count`. Add `hardware:` to the recipe or fix the missing field.
+- **Quantization default.** `dtype: float16` → `quantization="FP16"` (auto). For `bfloat16` / `float32` / `auto`, set `quantization:` explicitly.
+- **`lmx` must be installed.** `find_lmx()` raises `FileNotFoundError` with install instructions when the binary is missing from `$PATH` and `--lmx-bin` is not given. The CLI catches this and exits with code 1 + a printed error message — never hangs.
+- **Temp files are cleaned up.** The payload temp file is `delete=True` and removed in a `finally` block; do not add long-running work between `submit_submission()` returning and the caller logging.
+- **`subprocess.run` with a list argv (no shell).** No shell injection risk; the only inputs passed to lmx are the temp file path (we own), the optional `--api-url` flag value (user-controlled but separated as a list element, not interpolated into a string), and the lmx binary path (user-controlled, same).
+
+---
+
+## 11. Validation status (v1)
+
+- 223 tests passing (test_recipe + HardwareSection + test_export + test_submit rewritten to mock `lmx` via subprocess shell-out)
 - ruff + basedpyright strict: clean
-- 4 recipes shipped (gfx1030 production + cross-platform perplexity + KLD)
+- 4 recipes shipped (gfx1030 production + cross-platform perplexity + KLD), all with `hardware:` + `quantization:` blocks
 - CI runs on `ubuntu-latest` (CPU-only) via `.github/workflows/ci.yml`
+- `bs submit` tested with a fake-lmx bash script that records argv and prints synthetic output — no `lmx` binary required in CI
 - **GPU smoke deferred**: this v1 was built while real GPUs were busy with bug investigations. Real-hardware validation is a separate session.

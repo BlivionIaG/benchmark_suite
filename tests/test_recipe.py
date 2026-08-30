@@ -145,3 +145,111 @@ def test_endpoint_model_name_overrides() -> None:
         }
     )
     assert r.endpoint.model_name == "custom-name"
+
+
+def test_hardware_section_defaults() -> None:
+    from benchmark_suite.recipe import HardwareSection
+
+    h = HardwareSection()
+    assert h.vendor == "amd"
+    assert h.count == 1
+    assert h.vram_gb == 0
+    assert h.model == ""
+    assert not h.is_complete()
+
+
+def test_hardware_section_is_complete() -> None:
+    from benchmark_suite.recipe import HardwareSection
+
+    h = HardwareSection(model="Radeon PRO V620", vram_gb=32, count=4)
+    assert h.is_complete()
+
+    h_no_model = HardwareSection(vram_gb=32, count=4)
+    assert not h_no_model.is_complete()
+
+    h_no_vram = HardwareSection(model="X", count=4)
+    assert not h_no_vram.is_complete()
+
+
+def test_hardware_vendor_enum() -> None:
+    from typing import Any, cast
+
+    from pydantic import ValidationError
+
+    from benchmark_suite.recipe import HardwareSection
+
+    h = HardwareSection(vendor="nvidia")
+    assert h.vendor == "nvidia"
+    with pytest.raises(ValidationError):
+        HardwareSection(vendor=cast(Any, "bogus-vendor"))
+
+
+def test_recipe_quantization_defaults_to_fp16_for_float16_dtype() -> None:
+    r = Recipe.model_validate(
+        {
+            "meta": {"name": "x", "description": "y"},
+            "backend": {"type": "vllm", "model_path": "/models/M"},
+            "resources": {"dtype": "float16"},
+        }
+    )
+    assert r.quantization == "FP16"
+
+
+def test_recipe_quantization_explicit_overrides_default() -> None:
+    r = Recipe.model_validate(
+        {
+            "meta": {"name": "x", "description": "y"},
+            "backend": {"type": "vllm", "model_path": "/models/M"},
+            "resources": {"dtype": "float16"},
+            "quantization": "W4A16-G32",
+        }
+    )
+    assert r.quantization == "W4A16-G32"
+
+
+def test_recipe_quantization_stays_empty_for_non_float16_dtype() -> None:
+    r = Recipe.model_validate(
+        {
+            "meta": {"name": "x", "description": "y"},
+            "backend": {"type": "vllm", "model_path": "/models/M"},
+            "resources": {"dtype": "bfloat16"},
+        }
+    )
+    assert r.quantization == ""
+
+
+def test_recipe_hardware_default_is_empty_section() -> None:
+    r = Recipe.model_validate(
+        {
+            "meta": {"name": "x", "description": "y"},
+            "backend": {"type": "vllm", "model_path": "/models/M"},
+        }
+    )
+    assert r.hardware.vendor == "amd"
+    assert r.hardware.count == 1
+    assert r.hardware.vram_gb == 0
+    assert not r.hardware.is_complete()
+
+
+def test_recipe_hardware_loads_from_dict() -> None:
+    r = Recipe.model_validate(
+        {
+            "meta": {"name": "x", "description": "y"},
+            "backend": {"type": "vllm", "model_path": "/models/M"},
+            "hardware": {
+                "vendor": "amd",
+                "model": "Radeon PRO V620",
+                "count": 4,
+                "vram_gb": 32,
+                "cpu": "EPYC 7452",
+                "ram_gb": 256,
+                "os": "Ubuntu 22.04",
+                "power_watts": 200,
+            },
+        }
+    )
+    assert r.hardware.is_complete()
+    assert r.hardware.model == "Radeon PRO V620"
+    assert r.hardware.count == 4
+    assert r.hardware.vram_gb == 32
+    assert r.hardware.power_watts == 200

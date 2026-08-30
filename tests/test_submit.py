@@ -1,28 +1,32 @@
-"""tests/test_submit.py — bs submit HTTP POST flow.
+"""tests/test_submit.py — bs submit subprocess shell-out to localmaxxing's `lmx`.
 
-Tests use a MockHttpx context manager that swaps benchmark_suite.submission's
-httpx.Client for one backed by httpx.MockTransport. The tarball contents are
-checked by decoding what the mock received, not by re-implementing the bundle
-logic (which is covered by test_export.py).
+`bs submit` builds a JSON payload, writes it to a temp file, and shells
+out to `lmx speed-test submit` (or `dry-run`). Tests mock the lmx
+binary with a small bash script that records invocations and prints
+synthetic success output.
 """
 from __future__ import annotations
 
-import io
 import json
-import tarfile
+import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-import httpx
 import pytest
 from typer.testing import CliRunner
 
 from benchmark_suite.cli import app
+from benchmark_suite.recipe import (
+    BackendSection,
+    EndpointSection,
+    HardwareSection,
+    MetaSection,
+    Recipe,
+)
+from benchmark_suite.scoring.base import ScoreRecord
 from benchmark_suite.submission import (
-    DEFAULT_LEADERBOARD_URL,
-    SubmitResult,
-    resolve_leaderboard_url,
+    find_lmx,
     submit_submission,
 )
 
@@ -32,418 +36,314 @@ runner = CliRunner()
 # ----- fixtures -----
 
 
-RecipeDict = dict[str, Any]
+@pytest.fixture
+def fake_lmx(tmp_path: Path) -> Path:
+    script = tmp_path / "fake-lmx"
+    invocations = tmp_path / "invocations"
+    invocations.mkdir()
+    invocations_env = invocations.resolve().as_posix()
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"INV_DIR={invocations_env}\n"
+        "mkdir -p \"$INV_DIR\"\n"
+        "rec=\"$INV_DIR/$(basename \"$0\")-$RANDOM-$$.jsonl\"\n"
+        "python3 - \"$rec\" \"$@\" <<'PYEOF'\n"
+        "import json, sys\n"
+        "rec = sys.argv[1]\n"
+        "with open(rec, 'a') as f:\n"
+        "    f.write(json.dumps({'argv': sys.argv[2:]}) + '\\n')\n"
+        "PYEOF\n"
+        "subcmd=\"${2:-submit}\"\n"
+        "if [ \"${LMX_FAIL:-0}\" = \"1\" ]; then\n"
+        "  echo \"lmx rejected payload: hfId required\" >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "if [ \"$subcmd\" = \"dry-run\" ]; then\n"
+        "  echo \"valid: true\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "echo \"submitted: abc-123\"\n"
+        "echo \"view at: https://www.localmaxxing.com/speed-tests/abc-123\"\n"
+        "exit 0\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _seed_recipe() -> Recipe:
+    return Recipe(
+        meta=MetaSection(name="test", description="x"),
+        backend=BackendSection(type="vllm", model_path="Qwen/Qwen3-8B"),
+        endpoint=EndpointSection(url="http://127.0.0.1:8000"),
+        hardware=HardwareSection(
+            vendor="amd",
+            model="Radeon PRO V620",
+            count=4,
+            vram_gb=32,
+        ),
+    )
+
+
+def _seed_score() -> ScoreRecord:
+    return ScoreRecord(
+        kind="throughput",
+        cell_id="dense_triton_triton_cg0_mtp0",
+        status="success",
+        metrics={"output_tok_s": 87.4, "ttft_mean_ms": 142.5, "input_tok_s": 1210.5},
+    )
 
 
 @pytest.fixture
 def sample_result_dir(tmp_path: Path) -> Path:
-    """Minimal result dir with summary.json/csv/README.md + a recipe-shaped blob."""
     rd = tmp_path / "cell"
     rd.mkdir()
-    recipe: RecipeDict = {
-        "meta": {"name": "test-recipe", "description": "x", "version": "1.0.0", "tags": []},
-        "backend": {"type": "external", "model_path": "/models/x"},
-        "endpoint": {"url": "http://127.0.0.1:8000"},
-        "resources": {"tensor_parallel_size": 1, "dtype": "float16"},
-        "bench": {
-            "load": {"concurrencies": [1], "num_prompts": 4, "input_len": 16, "output_len": 8},
-            "scoring": [{"kind": "throughput", "tool": "vllm-bench"}],
-        },
-    }
-    (rd / "summary.json").write_text(json.dumps({"recipe": recipe, "scores": []}))
-    (rd / "summary.csv").write_text("metric,value\noutput_tok_s,42.5\nttft_mean_ms,120\n")
+    recipe = _seed_recipe()
+    score = _seed_score()
+    (rd / "summary.json").write_text(
+        json.dumps({"recipe": recipe.model_dump(mode="json"), "scores": [score.to_dict()]})
+    )
+    (rd / "summary.csv").write_text("metric,value\noutput_tok_s,87.4\n")
     (rd / "README.md").write_text("# test\n\nsample run\n")
     return rd
 
 
-class MockHttpx:
-    """Context manager that swaps `benchmark_suite.submission.httpx.Client`
-    for one backed by a MockTransport.
-
-    Usage:
-        with MockHttpx(handler) as captured:
-            submit_submission(...)
-        # captured dict is populated by the handler with whatever it wants
-    """
-
-    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
-        self._handler = handler
-        self._transport = httpx.MockTransport(handler)
-        self._orig_client: type[httpx.Client] | None = None
-        self.captured: dict[str, Any] = {}
-
-    def __enter__(self) -> dict[str, Any]:
-        import benchmark_suite.submission as sub
-
-        self._orig_client = sub.httpx.Client
-        sub.httpx.Client = self._factory
-        return self.captured
-
-    def __exit__(self, *exc: object) -> None:
-        import benchmark_suite.submission as sub
-
-        if self._orig_client is not None:
-            sub.httpx.Client = self._orig_client
-
-    def _factory(self, *args: object, **kwargs: object) -> httpx.Client:
-        orig = self._orig_client
-        if orig is None:
-            raise RuntimeError("MockHttpx used outside `with` block")
-        merged: dict[str, object] = {"transport": self._transport, **kwargs}
-        return orig(*args, **merged)
+def _latest_invocation(fake_lmx: Path) -> dict[str, Any]:
+    invocations_dir = fake_lmx.parent / "invocations"
+    files = sorted(invocations_dir.glob("*.jsonl"))
+    assert files, "fake lmx was not invoked"
+    last = files[-1].read_text().strip().splitlines()[-1]
+    return json.loads(last)
 
 
-def _assert_tarball_contents(tar_bytes: bytes) -> set[str]:
-    """Return the set of filenames inside the tarball."""
-    names: set[str] = set()
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tf:
-        for member in tf.getmembers():
-            names.add(member.name)
-    return names
+# ----- find_lmx -----
 
 
-# ----- unit tests -----
+def test_find_lmx_explicit_path(fake_lmx: Path) -> None:
+    assert find_lmx(str(fake_lmx)) == str(fake_lmx)
 
 
-def test_submit_success_201(sample_result_dir: Path) -> None:
-    """Happy path: server returns 201 + submission_id, we return the public URL."""
+def test_find_lmx_explicit_missing(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        find_lmx(str(tmp_path / "does-not-exist"))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            201,
-            json={
-                "submission_id": "abc-123",
-                "public_url": "https://bench.uncool.red/runs/abc-123",
-            },
-        )
 
-    with MockHttpx(handler):
-        result = submit_submission(
-            sample_result_dir,
-            handle="testuser",
-            endpoint="https://bench.uncool.red",
-        )
+def test_find_lmx_not_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    empty_path = tmp_path / "empty-bin"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+    with pytest.raises(FileNotFoundError, match="binary not found"):
+        find_lmx(None)
+
+
+def test_find_lmx_on_path(
+    fake_lmx: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_which(name: str) -> str | None:
+        return str(fake_lmx) if name == "lmx" else None
+
+    monkeypatch.setattr("shutil.which", cast(Callable[[str], str | None], fake_which))
+    assert find_lmx(None) == str(fake_lmx)
+
+
+# ----- submit_submission (unit) -----
+
+
+def test_submit_success_calls_lmx_submit(fake_lmx: Path, sample_result_dir: Path) -> None:
+    result = submit_submission(
+        sample_result_dir,
+        lmx_bin=str(fake_lmx),
+        endpoint="https://www.localmaxxing.com",
+    )
 
     assert result.get("submission_id") == "abc-123"
-    assert result.get("public_url") == "https://bench.uncool.red/runs/abc-123"
-    assert result.get("http_status") == 201
-    assert result.get("endpoint") == "https://bench.uncool.red"
+    assert result.get("public_url") == "https://www.localmaxxing.com/speed-tests/abc-123"
+    assert result.get("lmx_exit_code") == 0
+
+    inv = _latest_invocation(fake_lmx)
+    argv = inv["argv"]
+    assert argv[0] == "speed-test"
+    assert argv[1] == "submit"
+    assert "--api-url" in argv
+    assert "https://www.localmaxxing.com" in argv
 
 
-def test_submit_post_body_has_required_form_fields(sample_result_dir: Path) -> None:
-    """The HTTP request must include file/handle/date/metadata fields."""
-    captured: dict[str, Any] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        ctype = request.headers.get("content-type", "")
-        body: bytes = request.read()
-        captured["content_type"] = ctype
-        captured["body"] = body
-        return httpx.Response(
-            201,
-            json={"submission_id": "ok", "public_url": "https://bench.uncool.red/runs/ok"},
-        )
-
-    with MockHttpx(handler):
-        submit_submission(
-            sample_result_dir,
-            handle="testuser",
-            endpoint="https://bench.uncool.red",
-        )
-
-    body: bytes = captured["body"]
-    assert b'name="handle"' in body
-    assert b"testuser" in body
-    assert b'name="date"' in body
-    assert b'name="metadata"' in body
-    assert b'name="file"' in body
-    assert b"submission.tar.gz" in body
-
-
-def test_submit_tarball_contains_required_files(sample_result_dir: Path) -> None:
-    """Tarball in POST body must contain recipe.yaml + summary.* + README.md + metadata.json."""
-    captured: dict[str, Any] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = request.read()
-        ctype = request.headers.get("content-type", "")
-        boundary = ctype.split("boundary=", 1)[1].split(";", 1)[0]
-        boundary_b = b"--" + boundary.encode()
-        chunks = body.split(boundary_b)
-        for chunk in chunks:
-            if b'name="file"' in chunk:
-                start = chunk.find(b"\r\n\r\n") + 4
-                end = chunk.rfind(b"\r\n")
-                captured["file_bytes"] = chunk[start:end]
-                break
-        return httpx.Response(
-            201,
-            json={"submission_id": "ok", "public_url": "https://bench.uncool.red/runs/ok"},
-        )
-
-    with MockHttpx(handler):
-        submit_submission(
-            sample_result_dir,
-            handle="testuser",
-            endpoint="https://bench.uncool.red",
-        )
-
-    file_bytes: bytes = captured["file_bytes"]
-    names = _assert_tarball_contents(file_bytes)
-    assert "recipe.yaml" in names
-    assert "summary.csv" in names
-    assert "summary.json" in names
-    assert "README.md" in names
-    assert "metadata.json" in names
-
-
-def test_submit_server_400_returns_structured_error(sample_result_dir: Path) -> None:
-    """Server-side validation failure surfaces error + details from the response."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            400,
-            json={"error": "handle_invalid", "details": "must match ^[a-z0-9]..."},
-        )
-
-    with MockHttpx(handler):
-        result = submit_submission(
-            sample_result_dir, handle="testuser", endpoint="https://bench.uncool.red"
-        )
-
-    typed: SubmitResult = result
-    assert typed.get("error") == "handle_invalid"
-    assert "must match" in typed.get("details", "")
-    assert typed.get("http_status") == 400
-    assert "submission_id" not in typed
-
-
-def test_submit_offline_fallback_writes_to_cache(
-    sample_result_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_submit_dry_run_calls_lmx_dry_run(
+    fake_lmx: Path, sample_result_dir: Path
 ) -> None:
-    """Network failure -> tarball lands in ~/.cache/bs/submissions/."""
-    monkeypatch.setenv("BS_CACHE_DIR", str(sample_result_dir.parent / "cache"))
+    result = submit_submission(
+        sample_result_dir,
+        lmx_bin=str(fake_lmx),
+        dry_run=True,
+    )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused")
+    assert result.get("dry_run_valid") is True
+    assert "valid: true" in result.get("dry_run_stdout", "")
 
-    with MockHttpx(handler):
-        result = submit_submission(
-            sample_result_dir, handle="testuser", endpoint="https://bench.uncool.red"
-        )
-
-    typed: SubmitResult = result
-    assert typed.get("error") == "offline"
-    local_path = typed.get("local_path")
-    assert local_path
-    local = Path(local_path)
-    assert local.exists()
-    assert local.stat().st_size > 0
-    assert local.suffix == ".gz"
-    assert "testuser" in local.name
+    inv = _latest_invocation(fake_lmx)
+    argv = inv["argv"]
+    assert argv[1] == "dry-run"
 
 
-def test_submit_offline_no_fallback_returns_error(sample_result_dir: Path) -> None:
-    """With allow_offline_fallback=False, a connection error surfaces in the result."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused")
-
-    with MockHttpx(handler):
-        result = submit_submission(
-            sample_result_dir,
-            handle="testuser",
-            endpoint="https://bench.uncool.red",
-            allow_offline_fallback=False,
-        )
-
-    typed: SubmitResult = result
-    assert typed.get("error") == "offline"
-    assert "local_path" not in typed
-
-
-def test_submit_leaderboard_url_env_var(
-    sample_result_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_submit_no_endpoint_omits_api_url_flag(
+    fake_lmx: Path, sample_result_dir: Path
 ) -> None:
-    """LEADERBOARD_URL env var is respected when --endpoint is not given."""
-    seen_url: dict[str, str] = {}
+    result = submit_submission(sample_result_dir, lmx_bin=str(fake_lmx))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen_url["url"] = str(request.url)
-        return httpx.Response(
-            201, json={"submission_id": "ok", "public_url": "https://example.test/runs/ok"}
-        )
-
-    monkeypatch.setenv("LEADERBOARD_URL", "https://example.test")
-    with MockHttpx(handler):
-        result = submit_submission(sample_result_dir, handle="testuser")
-
-    typed: SubmitResult = result
-    assert seen_url["url"] == "https://example.test/api/submissions"
-    assert typed.get("endpoint") == "https://example.test"
+    assert result.get("submission_id") == "abc-123"
+    inv = _latest_invocation(fake_lmx)
+    assert "--api-url" not in inv["argv"]
 
 
-def test_submit_endpoint_flag_overrides_env(
-    sample_result_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_submit_payload_temp_file_deleted_after_run(
+    fake_lmx: Path, sample_result_dir: Path
 ) -> None:
-    """--endpoint (passed as positional arg) takes precedence over $LEADERBOARD_URL."""
-    seen_url: dict[str, str] = {}
+    submit_submission(sample_result_dir, lmx_bin=str(fake_lmx))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen_url["url"] = str(request.url)
-        return httpx.Response(
-            201, json={"submission_id": "ok", "public_url": "https://override.test/runs/ok"}
-        )
-
-    monkeypatch.setenv("LEADERBOARD_URL", "https://env.example.com")
-    with MockHttpx(handler):
-        submit_submission(
-            sample_result_dir, handle="testuser", endpoint="https://override.test"
-        )
-
-    assert seen_url["url"] == "https://override.test/api/submissions"
+    inv = _latest_invocation(fake_lmx)
+    payload_path = Path(inv["argv"][2])
+    assert not payload_path.exists(), (
+        "temp payload file must be cleaned up after lmx runs"
+    )
 
 
-def test_submit_default_endpoint_is_bench_uncool_red(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no env var and no --endpoint, default is https://bench.uncool.red."""
-    monkeypatch.delenv("LEADERBOARD_URL", raising=False)
-    assert resolve_leaderboard_url(None) == DEFAULT_LEADERBOARD_URL
-    assert resolve_leaderboard_url(None) == "https://bench.uncool.red"
+def test_submit_lmx_failure_returns_structured_error(
+    tmp_path: Path, sample_result_dir: Path
+) -> None:
+    fake = tmp_path / "fail-lmx"
+    fake.write_text("#!/usr/bin/env bash\necho 'lmx rejected payload' >&2\nexit 1\n")
+    fake.chmod(0o755)
+
+    result = submit_submission(sample_result_dir, lmx_bin=str(fake))
+
+    assert result.get("error") == "lmx_failed"
+    assert result.get("lmx_exit_code") == 1
+    assert "lmx rejected payload" in result.get("lmx_stderr", "")
+    assert result.get("submission_id", "") == ""
 
 
-def test_submit_empty_handle_raises(sample_result_dir: Path) -> None:
-    with pytest.raises(ValueError, match="handle"):
-        submit_submission(sample_result_dir, handle="", endpoint="https://x.test")
+def test_submit_lmx_not_found(
+    tmp_path: Path, sample_result_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    empty_path = tmp_path / "empty-bin"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+
+    result = submit_submission(sample_result_dir, lmx_bin=None)
+
+    assert result.get("lmx_not_found") is True
+    assert result.get("error") == "lmx_not_found"
+    assert "lmx" in result.get("details", "").lower()
 
 
-def test_submit_missing_summary_json_raises(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match=re_escape("summary.json")):
+def test_submit_missing_summary_json_raises(tmp_path: Path, fake_lmx: Path) -> None:
+    with pytest.raises(FileNotFoundError, match=re.escape("summary.json")):
         submit_submission(
             tmp_path / "no-such-dir",
-            handle="testuser",
-            endpoint="https://x.test",
+            lmx_bin=str(fake_lmx),
         )
 
 
-# ----- CLI tests -----
+def test_submit_no_output_tok_s_raises(
+    tmp_path: Path, fake_lmx: Path
+) -> None:
+    rd = tmp_path / "cell"
+    rd.mkdir()
+    recipe = Recipe(
+        meta=MetaSection(name="t", description="x"),
+        backend=BackendSection(type="external"),
+    )
+    (rd / "summary.json").write_text(
+        json.dumps({"recipe": recipe.model_dump(mode="json"), "scores": []})
+    )
+    with pytest.raises(ValueError, match="output_tok_s"):
+        submit_submission(rd, lmx_bin=str(fake_lmx))
+
+
+# ----- CLI -----
 
 
 def test_cli_submit_help() -> None:
-    """The submit command is registered and its help renders."""
     result = runner.invoke(app, ["submit", "--help"])
     assert result.exit_code == 0
-    assert "--handle" in result.output
+    assert "--lmx-bin" in result.output
     assert "--endpoint" in result.output
-    assert "bench.uncool.red" in result.output
+    assert "--dry-run" in result.output
+    assert "--api-key" not in result.output, (
+        "lmx handles auth; --api-key was removed in the shell-out rewrite"
+    )
+    assert "lmx" in result.output
 
 
-def test_cli_submit_handle_required(sample_result_dir: Path) -> None:
-    """Without --handle, the CLI exits 2 with a clear error."""
-    result = runner.invoke(app, ["submit", str(sample_result_dir)])
-    assert result.exit_code == 2
-    assert "--handle" in result.output
-
-
-def test_cli_submit_missing_dir() -> None:
-    """A non-existent result dir exits with an error."""
+def test_cli_submit_missing_dir(fake_lmx: Path) -> None:
     result = runner.invoke(
-        app, ["submit", "/no/such/dir", "--handle", "testuser"]
+        app, ["submit", "/no/such/dir", "--lmx-bin", str(fake_lmx)]
     )
     assert result.exit_code != 0
 
 
-def test_cli_submit_calls_endpoint_and_prints_url(
-    sample_result_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_cli_submit_happy_path_prints_url(
+    fake_lmx: Path, sample_result_dir: Path
 ) -> None:
-    """End-to-end CLI invocation: --endpoint captures the request, output shows URL."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            201,
-            json={
-                "submission_id": "cli-ok",
-                "public_url": "https://bench.uncool.red/runs/cli-ok",
-            },
-        )
-
-    with MockHttpx(handler):
-        result = runner.invoke(
-            app,
-            [
-                "submit",
-                str(sample_result_dir),
-                "--handle",
-                "testuser",
-                "--endpoint",
-                "https://bench.uncool.red",
-                "--hardware-gpu",
-                "Radeon PRO V620",
-                "--hardware-gpu-count",
-                "4",
-            ],
-        )
+    result = runner.invoke(
+        app,
+        [
+            "submit",
+            str(sample_result_dir),
+            "--lmx-bin",
+            str(fake_lmx),
+            "--endpoint",
+            "https://www.localmaxxing.com",
+        ],
+    )
 
     assert result.exit_code == 0, result.output
-    assert "cli-ok" in result.output
-    assert "bench.uncool.red/runs/cli-ok" in result.output
+    assert "abc-123" in result.output
+    assert "localmaxxing.com/speed-tests/abc-123" in result.output
 
 
-def test_cli_submit_offline_uses_env_var_endpoint(
-    sample_result_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_cli_submit_dry_run_prints_valid(
+    fake_lmx: Path, sample_result_dir: Path
 ) -> None:
-    """LEADERBOARD_URL env var is picked up by the CLI as the endpoint."""
-    monkeypatch.setenv("BS_CACHE_DIR", str(sample_result_dir.parent / "cli-cache"))
+    result = runner.invoke(
+        app,
+        [
+            "submit",
+            str(sample_result_dir),
+            "--lmx-bin",
+            str(fake_lmx),
+            "--dry-run",
+        ],
+    )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused")
+    assert result.exit_code == 0, result.output
+    assert "payload valid" in result.output
 
-    monkeypatch.setenv("LEADERBOARD_URL", "https://offline.test")
-    with MockHttpx(handler):
-        result = runner.invoke(
-            app,
-            [
-                "submit",
-                str(sample_result_dir),
-                "--handle",
-                "testuser",
-            ],
-        )
+
+def test_cli_submit_lmx_not_found(
+    tmp_path: Path, sample_result_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    empty_path = tmp_path / "empty-bin"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+
+    result = runner.invoke(app, ["submit", str(sample_result_dir)])
 
     assert result.exit_code == 1
-    assert "offline" in result.output.lower()
-    assert "cached" in result.output.lower()
+    assert "lmx" in result.output.lower()
 
 
-def test_cli_submit_no_offline_fallback_exits_clean(
-    sample_result_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_cli_submit_lmx_failure(
+    tmp_path: Path, sample_result_dir: Path
 ) -> None:
-    """With --no-offline-fallback, the CLI prints the offline error without writing cache."""
-    cache_dir = sample_result_dir.parent / "no-fallback-cache"
+    fake = tmp_path / "fail-lmx"
+    fake.write_text("#!/usr/bin/env bash\necho 'rejected' >&2\nexit 1\n")
+    fake.chmod(0o755)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused")
-
-    monkeypatch.setenv("BS_CACHE_DIR", str(cache_dir))
-    with MockHttpx(handler):
-        result = runner.invoke(
-            app,
-            [
-                "submit",
-                str(sample_result_dir),
-                "--handle",
-                "testuser",
-                "--endpoint",
-                "https://x.test",
-                "--no-offline-fallback",
-            ],
-        )
+    result = runner.invoke(
+        app,
+        ["submit", str(sample_result_dir), "--lmx-bin", str(fake)],
+    )
 
     assert result.exit_code == 1
-    assert not cache_dir.exists() or not any(cache_dir.glob("*.tar.gz"))
-
-
-def re_escape(s: str) -> str:
-    """Escape regex special characters for use in pytest.raises(match=...)."""
-    import re
-
-    return re.escape(s)
+    assert "rejected" in result.output

@@ -93,6 +93,40 @@ class ResourcesSection(BaseModel):
     extra_args: dict[str, object] = Field(default_factory=dict)  # escape-hatch CLI flags
 
 
+# Vendor identifiers for the localmaxxing `hardware.gpuName` mapping.
+# localmaxxing accepts any string for `gpuName`; this enum keeps recipes
+# consistent and exposes a typed surface for tooling.
+GpuVendor = Literal["amd", "nvidia", "intel", "apple", "tenstorrent", "other"]
+
+
+class HardwareSection(BaseModel):
+    """Hardware identity for the run, surfaced to leaderboard submissions.
+
+    Maps to the `hardware` field of the
+    [localmaxxing.com](https://www.localmaxxing.com) `POST /api/speed-tests`
+    schema (`hwClass: DISCRETE_GPU` for dGPU / multi-dGPU setups). The
+    fields below are the subset the leaderboard API exposes for dGPU
+    hardware; other `hwClass` values (`UNIFIED`, `CPU_ONLY`) require
+    fields this schema does not currently model — those are out of scope
+    for v1.
+
+    All fields are optional at parse time. `bs submit` requires
+    `vendor`, `model`, and at least one of `vram_gb` / `count` to
+    construct a valid payload.
+    """
+    vendor: GpuVendor = "amd"
+    model: str = ""
+    count: int = 1
+    vram_gb: int = 0
+    cpu: str = ""
+    ram_gb: int = 0
+    os: str = ""
+    power_watts: int = 0
+
+    def is_complete(self) -> bool:
+        return bool(self.model) and self.vram_gb > 0 and self.count > 0
+
+
 class RuntimeSection(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)   # merged over CANONICAL_ENV
     server_cmd: str = ""                                # explicit override; "" → synthesize
@@ -192,6 +226,8 @@ class Recipe(BaseModel):
     bench: BenchSection = Field(default_factory=BenchSection)
     report: ReportSection = Field(default_factory=ReportSection)
     cell: CellId = Field(default_factory=CellId)
+    hardware: HardwareSection = Field(default_factory=HardwareSection)
+    quantization: str = ""
 
     @model_validator(mode="after")
     def _coherence(self) -> Recipe:
@@ -201,6 +237,8 @@ class Recipe(BaseModel):
             self.endpoint.model_name = (
                 self.backend.served_model_name or Path(self.backend.model_path).name
             )
+        if not self.quantization and self.resources.dtype == "float16":
+            self.quantization = "FP16"
         return self
 
     def merged_env(self) -> dict[str, str]:

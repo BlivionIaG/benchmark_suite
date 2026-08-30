@@ -1,12 +1,12 @@
 # benchmark_suite
 
-Declarative benchmarking and quality scoring for OpenAI-compatible LLM endpoints.
+Declarative benchmarking and quality scoring for OpenAI-compatible LLM endpoints, with first-class submission to the [localmaxxing.com](https://www.localmaxxing.com) public leaderboard.
 
 [![CI](https://github.com/BlivionIaG/benchmark_suite/actions/workflows/ci.yml/badge.svg)](https://github.com/BlivionIaG/benchmark_suite/actions)
 
 ## What it is
 
-A CLI tool (`bs`) that runs reproducible benchmarks against any OpenAI-compatible HTTP endpoint — vLLM, llama.cpp server, TGI, OpenAI API — and produces comparable reports.
+A CLI tool (`bs`) that runs reproducible benchmarks against any OpenAI-compatible HTTP endpoint — vLLM, llama.cpp server, TGI, OpenAI API — and posts the results to [localmaxxing.com](https://www.localmaxxing.com) (a public inference leaderboard with structured hardware/software/model metadata).
 
 Five scorers shipped:
 
@@ -50,7 +50,120 @@ bs report results/qwen36_2026-08-30/dense_fardna2_rdna2_cg1_mtp0/
 
 # 6. Scaffold a new recipe
 bs init my-new-bench
+
+# 7. Submit to the localmaxxing.com leaderboard (via the official `lmx` CLI)
+#    First-time setup (one time only):
+#      1. Install lmx: https://github.com/LottoLottoLotto/localmaxxing-cli/releases/latest
+#      2. lmx auth login   # opens browser, generates API key, saves to ~/.config/localmaxxing/
+#    Then:
+bs submit results/qwen36_2026-08-30/dense_fardna2_rdna2_cg1_mtp0/
+
+# 8. (optional) Inspect the JSON payload before submitting
+bs export results/qwen36_2026-08-30/dense_fardna2_rdna2_cg1_mtp0/ -o /tmp/payload.json
+lmx speed-test dry-run /tmp/payload.json
 ```
+
+## Submitting to localmaxxing.com (via `lmx`)
+
+`benchmark_suite` is a **recipe + result-dir** automation layer. The actual leaderboard submission is delegated to the official [LocalMaxxing CLI (`lmx`)](https://github.com/LottoLottoLotto/localmaxxing-cli) — the same binary the `lmx` users run directly.
+
+`bs submit` builds the localmaxxing JSON payload from the recipe + `summary.json`, writes it to a temp file, and shells out to:
+
+```bash
+lmx speed-test submit /tmp/bs-submit-XXX.json
+# or with --dry-run:
+lmx speed-test dry-run /tmp/bs-submit-XXX.json
+```
+
+`bs` does **not** make HTTP calls directly. Authentication, request formatting, response parsing, retries, and rate-limit handling are all `lmx`'s responsibility.
+
+### Install `lmx`
+
+```bash
+# Linux (amd64)
+curl -fsSLO https://github.com/LottoLottoLotto/localmaxxing-cli/releases/latest/download/lmx-linux-amd64.tar.gz
+curl -fsSLO https://github.com/LottoLottoLotto/localmaxxing-cli/releases/latest/download/checksums.txt
+sha256sum --check --ignore-missing checksums.txt
+tar -xzf lmx-linux-amd64.tar.gz
+sudo mv lmx /usr/local/bin/
+
+# Or build from source (Go 1.22+)
+go install github.com/LottoLottoLotto/localmaxxing-cli/cmd/lmx@latest
+
+# Verify
+lmx --version
+```
+
+### Authenticate
+
+```bash
+# Recommended for agents/CI: set the env var
+export LMX_API_KEY=bhk_...
+
+# Or interactive device-flow login (opens browser)
+lmx auth login
+
+# Or save the key locally (no shell history leak)
+printf '%s\n' "$LMX_API_KEY" | lmx auth --key-stdin
+```
+
+`lmx` checks `$LMX_API_KEY` first, then `~/.config/localmaxxing/config.json`. `bs submit` does not pass the key directly — `lmx` reads it.
+
+### Submit a result dir
+
+```bash
+bs submit results/qwen36_2026-08-30/dense_fardna2_rdna2_cg1_mtp0/
+# → submitted: abc-123
+# → view at:    https://www.localmaxxing.com/speed-tests/abc-123
+```
+
+### Validate before posting
+
+```bash
+bs submit results/<cell>/ --dry-run
+# → payload valid (lmx accepted)
+```
+
+`lmx speed-test dry-run` does **not** consume the 1/min rate limit and does **not** write to the leaderboard. Use it freely during recipe iteration.
+
+### Inspect the payload
+
+```bash
+bs export results/<cell>/ -o /tmp/payload.json
+# → wrote /tmp/payload.json
+
+# Hand to lmx yourself if you prefer
+lmx speed-test dry-run /tmp/payload.json
+lmx speed-test submit /tmp/payload.json
+```
+
+### CLI flags
+
+| Flag | Purpose |
+|---|---|
+| `--lmx-bin <path>` | Path to the `lmx` binary. Defaults to `$PATH` lookup. |
+| `--endpoint <url>` | Override the localmaxxing base URL (passed as `--api-url` to lmx). |
+| `--notes <text>` | Free-form notes (max 2000 chars). |
+| `--dry-run` | Use `lmx speed-test dry-run` instead of `submit`. |
+
+### Recipe → payload mapping
+
+`bs submit` reads `summary.json` (produced by `bs run`) and the recipe's `hardware:` + `quantization:` blocks, then constructs the localmaxxing JSON payload:
+
+| Recipe field | localmaxxing field |
+|---|---|
+| `backend.type` | `engineName` (`vllm` / `llama.cpp` / `tgi` / `external`) |
+| `backend.model_path` (`org/name`) | `hfId` |
+| `resources.dtype` + `quantization:` | `quantization` (`FP16` default; explicit for everything else) |
+| `hardware:` (when `is_complete()`) | `hardware.hwClass=DISCRETE_GPU` + gpuName/gpuCount/vramGb/cpu/ramGb/os |
+| `cell.render()` | `engineFlags.cellId` (preserves the parent project's cell-id convention) |
+| `resources.tensor_parallel_size` | `engineFlags.tensorParallel` |
+| `summary.scores[throughput].metrics.output_tok_s` | `tokSOut` |
+| `summary.scores[throughput].metrics.input_tok_s` | `tokSPrefill` |
+| `summary.scores[throughput].metrics.ttft_mean_ms` | `ttftMs` |
+| `--notes` | `notes` (clamped to 2000 chars) |
+
+See [`benchmark_suite/submission.py`](benchmark_suite/submission.py) for the exact mapping.
 
 ## Recipe Anatomy
 
@@ -66,6 +179,8 @@ A recipe is a YAML file with these top-level sections:
 | `bench` | Load profile + scorers |
 | `report` | Output format, output dir |
 | `cell` | Cell ID fields (family, attn, linear, cg, mtp) |
+| `hardware` | GPU/CPU/RAM identity (maps to localmaxxing `hardware` field) |
+| `quantization` | Free-form quantization label (e.g. `W4A16-G32`, `FP16`, `EXL3-3bpw`) |
 
 Example recipe (`recipes/qwen36-27b-gptq-tp4.yaml`):
 
@@ -77,7 +192,7 @@ meta:
 
 backend:
   type: vllm
-  model_path: /models/Qwen3.6-27B-GPTQ-W4A16-G32
+  model_path: Qwen/Qwen3.6-27B-GPTQ-W4A16-G32  # HF id for localmaxxing
 
 endpoint:
   url: http://127.0.0.1:8000
@@ -104,6 +219,18 @@ cell:
   linear: rdna2
   cg: 1
   mtp: 0
+
+hardware:
+  vendor: amd
+  model: Radeon PRO V620
+  count: 4
+  vram_gb: 32
+  cpu: EPYC 7452
+  ram_gb: 256
+  os: Ubuntu 22.04
+  power_watts: 200
+
+quantization: W4A16-G32
 ```
 
 ### Shipped recipes
@@ -115,7 +242,7 @@ cell:
 | `recipes/perplexity-compare.yaml` | Cross-platform wikitext perplexity against any external endpoint |
 | `recipes/kld-vs-fp16-reference.yaml` | KLD divergence vs a converted fp16 reference cache |
 
-`backend.type: external` recipes never spawn a server — `bs run` probes the endpoint and runs scorers only. Point `endpoint.url` at whatever is already running.
+`backend.type: external` recipes never spawn a server — `bs run` probes the endpoint and runs scorers only. Point `endpoint.url` at whatever is already running. Use `hardware.vendor: other` and an empty model name in these recipes if you're scoring an external service without a known GPU.
 
 ## Result Layout
 
@@ -181,9 +308,9 @@ The KLD scorer **refuses to run** if `manifest.json` is missing or the endpoint'
 scoring:
   - kind: llm_judge
     driver: native                # or "promptfoo"
-    judge_url: http://127.0.0.1:8001   # use a different endpoint for judging
-    judge_model: ""
-    rubric: "Score 0-10 for correctness and clarity."
+  judge_url: http://127.0.0.1:8001   # use a different endpoint for judging
+  judge_model: ""
+  rubric: "Score 0-10 for correctness and clarity."
 ```
 
 **Note**: For comparability across benchmarks, use a fixed external judge endpoint rather than self-judging against the candidate endpoint (self-judge bias).
@@ -193,9 +320,9 @@ scoring:
 ```yaml
 scoring:
   - kind: agentic
-    harness: inspect               # or "terminal-bench" (experimental)
-    tasks: [inspect-ai-task-name]
-    sandbox: docker
+  harness: inspect               # or "terminal-bench" (experimental)
+  tasks: [inspect-ai-task-name]
+  sandbox: docker
 ```
 
 `terminal-bench` requires Docker on the host and is best-effort — failures are surfaced in the report.
@@ -211,6 +338,8 @@ scoring:
 | `bs matrix <recipe> --axis k=v1,v2` | Sweep axes → one cell per combo |
 | `bs compare <dirA> <dirB>` | Delta table between two result dirs |
 | `bs report <result_dir>` | Regenerate summaries from artifacts |
+| `bs export <result_dir> -o <file>` | Write the localmaxxing JSON payload (no network, no `lmx`) |
+| `bs submit <result_dir> [--dry-run]` | Shell out to `lmx speed-test submit` (or `dry-run`) |
 | `bs init <name>` | Scaffold a new recipe |
 | `bs convert-logits <dir> --tokenizer <hf-id> --model-name <name> --prompts <file> --output <dir>` | One-time `f_*.fp16` → safetensors + manifest |
 
@@ -225,6 +354,7 @@ scoring:
 
 - **llm-perf**: The primary load generator. Install from source: `cargo install --git https://github.com/iopsystems/llm-perf --tag v0.1.16`. Or use the wrapper with `vllm-bench` fallback (no Rust required).
 - **vllm-bench**: Built into vLLM. `vllm bench throughput --model <model> --url <endpoint> ...`. Used when llm-perf is unavailable.
+- **lmx**: The official [LocalMaxxing CLI](https://github.com/LottoLottoLotto/localmaxxing-cli). Required for `bs submit`. See the "Submitting to localmaxxing.com" section above for install + auth instructions.
 - **lm-eval**: Install with `uv add --optional perplexity lm-eval==0.4.12`. Heavy dep (~GBs) due to torch + datasets.
 - **safetensors**: Required by KLD scorer (no torch dependency at scorer runtime; torch only in `bs convert-logits`).
 - **inspect-ai**: Install with `uv add --optional agentic inspect-ai==0.3.260`.
@@ -234,7 +364,7 @@ scoring:
 
 ```bash
 uv sync --extra dev
-uv run pytest tests/ -q       # 182 tests
+uv run pytest tests/ -q       # 227 tests
 uv run ruff check .
 uv run basedpyright benchmark_suite/ tests/
 ```
@@ -249,10 +379,11 @@ Because all benchmarks hit OpenAI-compatible endpoints, you can compare across:
 - Different hardware (gfx1030 vs gfx1100 vs NVIDIA)
 - Different model checkpoints (fp16 control vs quantized variant via KLD)
 
-Run the same recipe against two endpoints and `bs compare` to see the delta.
+Run the same recipe against two endpoints and `bs compare` to see the delta. Or post both to [localmaxxing.com](https://www.localmaxxing.com) for cross-user comparison.
 
 ## Limitations
 
 - **GPU smoke deferred**: This v1 ships without an end-to-end GPU run on real hardware. CI runs the recipe-validation + `--dry-run` path. Real-hardware validation is a separate session.
 - **Logprobs via /v1/completions only**: `/v1/chat/completions` does not expose per-token logprobs. Endpoints that only support chat-completions cannot be perplexity-scored.
 - **Self-judge bias**: LLM-judge scores are biased when the judge and candidate are the same endpoint. Use a fixed external judge.
+- **localmaxxing requires HuggingFace model IDs**: `backend.model_path` should be `org/name` for the leaderboard to validate it; absolute local paths fall back to the last segment (e.g. `/models/Qwen3-8B` → `Qwen3-8B`).

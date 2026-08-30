@@ -49,7 +49,7 @@ from benchmark_suite.scoring import (  # noqa: F401
     throughput,  # pyright: ignore[reportUnusedImport]
 )
 from benchmark_suite.scoring.base import ScoreRecord, ScorerRegistry, ScoreStatus
-from benchmark_suite.submission import DEFAULT_LEADERBOARD_URL, export_submission, submit_submission
+from benchmark_suite.submission import export_payload, submit_submission
 from benchmark_suite.tools.convert_kl_logits import convert_logit_cache
 
 app = typer.Typer(
@@ -589,110 +589,24 @@ def convert_logits_cmd(
 
 # ----- export -----
 
-_ARTIFACT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB per-file cap for bundled artifacts
-
-
-def _build_metadata_overrides(
-    *,
-    hardware_gpu: str,
-    hardware_gpu_count: int,
-    hardware_vram_gb: int,
-    hardware_cpu: str,
-    hardware_ram_gb: int,
-    software_os: str,
-    software_kernel: str,
-    software_rocm: str,
-    software_vllm: str,
-    software_python: str,
-    model_hf_repo: str,
-    model_hf_commit: str,
-    notes: str,
-) -> dict[str, object]:
-    """Assemble the metadata_overrides dict from CLI flag values."""
-    return {
-        "hardware": {
-            k: v
-            for k, v in {
-                "gpu": hardware_gpu,
-                "gpu_count": hardware_gpu_count or None,
-                "vram_gb": hardware_vram_gb or None,
-                "cpu": hardware_cpu,
-                "ram_gb": hardware_ram_gb or None,
-            }.items()
-            if v not in (None, "")
-        },
-        "software": {
-            k: v
-            for k, v in {
-                "os": software_os,
-                "kernel": software_kernel,
-                "rocm": software_rocm,
-                "vllm": software_vllm,
-                "python": software_python,
-            }.items()
-            if v not in (None, "")
-        },
-        "model": {
-            k: v
-            for k, v in {
-                "hf_repo": model_hf_repo,
-                "hf_commit": model_hf_commit,
-            }.items()
-            if v not in (None, "")
-        },
-        "notes": notes,
-    }
-
 
 @app.command()
 def export(
     result_dir: Annotated[
         Path, typer.Argument(exists=True, file_okay=False, help="Result dir produced by `bs run`.")
     ],
-    submitter: Annotated[
-        str, typer.Option("--submitter", help="GitHub handle of the contributor.")
-    ],
     output: Annotated[
-        Path, typer.Option("--output", "-o", help="Path to write the submission tarball (.tar.gz).")
+        Path, typer.Option("--output", "-o", help="Path to write the localmaxxing JSON payload.")
     ],
-    hardware_gpu: Annotated[str, typer.Option("--hardware-gpu")] = "",
-    hardware_gpu_count: Annotated[int, typer.Option("--hardware-gpu-count")] = 0,
-    hardware_vram_gb: Annotated[int, typer.Option("--hardware-vram-gb", min=0)] = 0,
-    hardware_cpu: Annotated[str, typer.Option("--hardware-cpu")] = "",
-    hardware_ram_gb: Annotated[int, typer.Option("--hardware-ram-gb", min=0)] = 0,
-    software_os: Annotated[str, typer.Option("--software-os")] = "",
-    software_kernel: Annotated[str, typer.Option("--software-kernel")] = "",
-    software_rocm: Annotated[str, typer.Option("--software-rocm")] = "",
-    software_vllm: Annotated[str, typer.Option("--software-vllm")] = "",
-    software_python: Annotated[str, typer.Option("--software-python")] = "",
-    model_hf_repo: Annotated[str, typer.Option("--model-hf-repo")] = "",
-    model_hf_commit: Annotated[str, typer.Option("--model-hf-commit")] = "",
     notes: Annotated[str, typer.Option("--notes")] = "",
-    auto_detect: Annotated[bool, typer.Option("--auto-detect")] = False,
 ) -> None:
-    """Bundle a result dir into a standardized submission tarball for the leaderboard."""
-    metadata_overrides = _build_metadata_overrides(
-        hardware_gpu=hardware_gpu,
-        hardware_gpu_count=hardware_gpu_count,
-        hardware_vram_gb=hardware_vram_gb,
-        hardware_cpu=hardware_cpu,
-        hardware_ram_gb=hardware_ram_gb,
-        software_os=software_os,
-        software_kernel=software_kernel,
-        software_rocm=software_rocm,
-        software_vllm=software_vllm,
-        software_python=software_python,
-        model_hf_repo=model_hf_repo,
-        model_hf_commit=model_hf_commit,
-        notes=notes,
-    )
-    out = export_submission(
-        result_dir=result_dir,
-        submitter=submitter,
-        output=output,
-        metadata_overrides=metadata_overrides,
-        auto_detect=auto_detect,
-    )
+    """Write the localmaxxing JSON payload that `bs submit` hands to `lmx`.
+
+    Useful for inspecting or diffing payloads without invoking the
+    network. Pass the same file to `lmx speed-test submit <file>`
+    directly if you prefer to bypass the shell-out wrapper.
+    """
+    out = export_payload(result_dir=result_dir, output=output, notes=notes)
     typer.echo(f"wrote {out}")
 
 
@@ -707,89 +621,54 @@ def submit(
             exists=True, file_okay=False, help="Result dir produced by `bs run`."
         ),
     ],
-    handle: Annotated[
-        str,
+    lmx_bin: Annotated[
+        str | None,
         typer.Option(
-            "--handle",
-            "-H",
-            help="Your contributor handle. ^[a-z0-9][a-z0-9-]{1,38}$ — GitHub username preferred.",
+            "--lmx-bin",
+            help="Path to the `lmx` binary. Defaults to $PATH lookup.",
         ),
-    ],
+    ] = None,
     endpoint: Annotated[
         str | None,
         typer.Option(
             "--endpoint",
             "-e",
-            help=f"Leaderboard URL. Defaults to $LEADERBOARD_URL or {DEFAULT_LEADERBOARD_URL}.",
+            help="Override the localmaxxing base URL (passed to lmx as --api-url).",
         ),
     ] = None,
-    hardware_gpu: Annotated[str, typer.Option("--hardware-gpu")] = "",
-    hardware_gpu_count: Annotated[int, typer.Option("--hardware-gpu-count")] = 0,
-    hardware_vram_gb: Annotated[int, typer.Option("--hardware-vram-gb", min=0)] = 0,
-    hardware_cpu: Annotated[str, typer.Option("--hardware-cpu")] = "",
-    hardware_ram_gb: Annotated[int, typer.Option("--hardware-ram-gb", min=0)] = 0,
-    software_os: Annotated[str, typer.Option("--software-os")] = "",
-    software_kernel: Annotated[str, typer.Option("--software-kernel")] = "",
-    software_rocm: Annotated[str, typer.Option("--software-rocm")] = "",
-    software_vllm: Annotated[str, typer.Option("--software-vllm")] = "",
-    software_python: Annotated[str, typer.Option("--software-python")] = "",
-    model_hf_repo: Annotated[str, typer.Option("--model-hf-repo")] = "",
-    model_hf_commit: Annotated[str, typer.Option("--model-hf-commit")] = "",
-    notes: Annotated[str, typer.Option("--notes")] = "",
-    auto_detect: Annotated[
+    notes: Annotated[
+        str, typer.Option("--notes", help="Free-form notes (max 2000 chars).")
+    ] = "",
+    dry_run: Annotated[
         bool,
         typer.Option(
-            "--auto-detect",
-            help="Auto-fill hardware/software/model from the local host.",
-        ),
-    ] = False,
-    no_offline_fallback: Annotated[
-        bool,
-        typer.Option(
-            "--no-offline-fallback",
-            help="Fail hard on network errors instead of caching the bundle to ~/.cache/bs/.",
+            "--dry-run",
+            help=(
+                "Validate the payload via `lmx speed-test dry-run` "
+                "without submitting. Does not consume the 1/min rate limit."
+            ),
         ),
     ] = False,
 ) -> None:
-    """Submit a result dir to the leaderboard (UserBenchmark-style HTTP POST).
+    """Submit a result dir to localmaxxing.com by shelling out to `lmx`.
 
-    The submission is bundled as a tarball in memory (recipe.yaml + summary.*
-    + README.md + metadata.json + artifacts/) and POSTed to the leaderboard's
-    `/api/submissions` endpoint. On success, prints the public URL of the new
-    run. On network failure, falls back to caching the bundle in
-    ~/.cache/bs/submissions/ so it can be retried later.
+    Reads `summary.json` from the result dir, maps it to the
+    localmaxxing schema, writes it to a temp file, and invokes
+    `lmx speed-test submit <file>` (or `lmx speed-test dry-run <file>`
+    with `--dry-run`). Authentication is handled by `lmx` itself
+    via `$LMX_API_KEY`, `lmx auth --key`, or `~/.config/localmaxxing/`.
 
-    Defaults to https://bench.uncool.red as the leaderboard URL. Override with
-    --endpoint or the $LEADERBOARD_URL env var.
+    Install `lmx` from
+    https://github.com/LottoLottoLotto/localmaxxing-cli/releases/latest
+    or `go install github.com/LottoLottoLotto/localmaxxing-cli/cmd/lmx@latest`.
     """
-    if not handle:
-        typer.echo("error: --handle is required (e.g. --handle myhandle)", err=True)
-        raise typer.Exit(code=2)
-
-    metadata_overrides = _build_metadata_overrides(
-        hardware_gpu=hardware_gpu,
-        hardware_gpu_count=hardware_gpu_count,
-        hardware_vram_gb=hardware_vram_gb,
-        hardware_cpu=hardware_cpu,
-        hardware_ram_gb=hardware_ram_gb,
-        software_os=software_os,
-        software_kernel=software_kernel,
-        software_rocm=software_rocm,
-        software_vllm=software_vllm,
-        software_python=software_python,
-        model_hf_repo=model_hf_repo,
-        model_hf_commit=model_hf_commit,
-        notes=notes,
-    )
-
     try:
         result = submit_submission(
             result_dir=result_dir,
-            handle=handle,
+            lmx_bin=lmx_bin,
             endpoint=endpoint,
-            metadata_overrides=metadata_overrides,
-            auto_detect=auto_detect,
-            allow_offline_fallback=not no_offline_fallback,
+            notes=notes,
+            dry_run=dry_run,
         )
     except FileNotFoundError as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -798,6 +677,19 @@ def submit(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
+    if result.get("lmx_not_found"):
+        typer.echo(f"error: {result.get('details', 'lmx not found')}", err=True)
+        raise typer.Exit(code=1)
+
+    if dry_run:
+        if result.get("dry_run_valid"):
+            typer.echo("dry-run: payload valid (lmx accepted)")
+            typer.echo(result.get("dry_run_stdout", ""))
+            return
+        typer.echo("dry-run: lmx rejected the payload", err=True)
+        typer.echo(result.get("details", ""), err=True)
+        raise typer.Exit(code=1)
+
     if "submission_id" in result:
         sub_id = result.get("submission_id", "")
         public = result.get("public_url", "")
@@ -805,23 +697,9 @@ def submit(
         typer.echo(f"view at:    {public}")
         return
 
-    if result.get("error") == "offline":
-        local = result.get("local_path")
-        if local:
-            typer.echo(
-                f"offline: cached submission to {local}",
-                err=True,
-            )
-            typer.echo(
-                "retry later with: bs submit --retry " + str(local),
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        typer.echo(f"offline: {result.get('details', 'no network')}", err=True)
-        raise typer.Exit(code=1)
-
     typer.echo(
-        f"error: {result.get('error', 'unknown')} ({result.get('http_status', '?')})",
+        f"error: {result.get('error', 'lmx_failed')} "
+        f"(lmx exit {result.get('lmx_exit_code', '?')})",
         err=True,
     )
     typer.echo(f"details: {result.get('details', '')}", err=True)

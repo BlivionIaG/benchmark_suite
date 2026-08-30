@@ -24,3 +24,8 @@ cell:
   linear: external
   cg: 0
   mtp: 0
+hardware:
+  vendor: other
+  model: external endpoint (no local GPU)
+  count: 0
+  vram_gb: 0

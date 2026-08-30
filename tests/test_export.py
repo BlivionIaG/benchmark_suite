@@ -1,9 +1,8 @@
-"""Tests for `bs export` — metadata collection + submission tarball bundling."""
+"""Tests for `bs export` — metadata collection + localmaxxing payload building."""
 from __future__ import annotations
 
 import json
 import subprocess
-import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,7 +10,13 @@ import pytest
 from typer.testing import CliRunner
 
 from benchmark_suite import cli
-from benchmark_suite.recipe import BackendSection, EndpointSection, MetaSection, Recipe
+from benchmark_suite.recipe import (
+    BackendSection,
+    EndpointSection,
+    HardwareSection,
+    MetaSection,
+    Recipe,
+)
 from benchmark_suite.scoring.base import ScoreRecord
 from benchmark_suite.scoring.metadata_collector import (
     build_metadata,
@@ -61,11 +66,6 @@ def seed_result_dir(result_dir: Path) -> None:
         "cell_id,scorer_kind\ndense_triton_triton_cg0_mtp0,throughput\n"
     )
     (result_dir / "README.md").write_text("# Test\n")
-
-
-def list_tar_members(path: Path) -> list[str]:
-    with tarfile.open(path, "r:gz") as tf:
-        return [m.name for m in tf.getmembers()]
 
 
 # ----- collect_hardware -----
@@ -189,95 +189,198 @@ def test_build_metadata_merges_overrides() -> None:
     assert md["date"] == "2026-08-30"
 
 
-# ----- export_submission -----
+# ----- build_lmx_payload + export_payload -----
 
 
-def test_export_submission_bundles_required_files(tmp_path: Path) -> None:
-    """recipe.yaml, summary.csv/json, README.md, metadata.json all present."""
+def test_build_lmx_payload_minimal(tmp_path: Path) -> None:
     result_dir = tmp_path / "rd"
     result_dir.mkdir()
-    seed_result_dir(result_dir)
-    out = cli.export_submission(
-        result_dir,
-        submitter="alice",
-        output=tmp_path / "sub.tar.gz",
-        metadata_overrides={"hardware": {"gpu": "Radeon PRO V620"}},
+    recipe = Recipe(
+        meta=MetaSection(name="test", description="x"),
+        backend=BackendSection(type="vllm", model_path="Qwen/Qwen3-8B"),
+        hardware=HardwareSection(vendor="amd", model="Radeon PRO V620", count=4, vram_gb=32),
     )
-    assert out.name.endswith(".tar.gz")
-    members = list_tar_members(out)
-    for expected in ("recipe.yaml", "summary.csv", "summary.json", "README.md", "metadata.json"):
-        assert expected in members, f"missing {expected} in {members}"
-
-
-def test_export_submission_metadata_overrides_win(tmp_path: Path) -> None:
-    """Explicit hardware_gpu override lands in metadata.json."""
-    result_dir = tmp_path / "rd"
-    result_dir.mkdir()
-    seed_result_dir(result_dir)
-    out = cli.export_submission(
-        result_dir,
-        submitter="alice",
-        output=tmp_path / "sub.tar.gz",
-        metadata_overrides={"hardware": {"gpu": "custom"}},
+    score = ScoreRecord(
+        kind="throughput",
+        cell_id="dense_triton_triton_cg0_mtp0",
+        status="success",
+        started_at=T0,
+        finished_at=T1,
+        metrics={"output_tok_s": 87.4, "input_tok_s": 1210.5, "ttft_mean_ms": 142.5},
     )
-    with tarfile.open(out, "r:gz") as tf:
-        member = tf.extractfile("metadata.json")
-        assert member is not None
-        metadata = json.loads(member.read())
-    assert metadata["hardware"]["gpu"] == "custom"
-
-
-def test_export_submission_writes_tar_zst(tmp_path: Path) -> None:
-    """Output is a valid gzipped tar archive."""
-    result_dir = tmp_path / "rd"
-    result_dir.mkdir()
-    seed_result_dir(result_dir)
-    out = cli.export_submission(
-        result_dir, submitter="alice", output=tmp_path / "sub.tar.gz"
+    (result_dir / "summary.json").write_text(
+        json.dumps({"recipe": recipe.model_dump(mode="json"), "scores": [score.to_dict()]})
     )
-    assert out.suffix == ".gz"
-    assert tarfile.is_tarfile(out)
+
+    from benchmark_suite.submission import build_lmx_payload
+
+    payload = build_lmx_payload(result_dir=result_dir)
+    assert payload["engineName"] == "vllm"
+    assert payload["quantization"] == "FP16"
+    assert payload["tokSOut"] == 87.4
+    assert payload["tokSPrefill"] == 1210.5
+    assert payload["ttftMs"] == 142.5
+    assert payload["hardware"]["hwClass"] == "DISCRETE_GPU"
+    assert payload["hardware"]["gpuName"] == "AMD Radeon PRO V620"
+    assert payload["hardware"]["gpuCount"] == 4
+    assert payload["hardware"]["vramGb"] == 32
+    assert payload["engineFlags"]["cellId"] == "dense_triton_triton_cg0_mtp0"
 
 
-def test_export_submission_includes_artifacts_if_small(tmp_path: Path) -> None:
-    """Small artifacts/ files are bundled; the artifacts/ dir is preserved."""
+def test_build_lmx_payload_hf_id_from_model_path(tmp_path: Path) -> None:
     result_dir = tmp_path / "rd"
     result_dir.mkdir()
-    seed_result_dir(result_dir)
-    artifacts = result_dir / "artifacts"
-    artifacts.mkdir()
-    (artifacts / "foo.json").write_text("{}")
-    out = cli.export_submission(
-        result_dir, submitter="alice", output=tmp_path / "sub.tar.gz"
+    recipe_local = Recipe(
+        meta=MetaSection(name="test", description="x"),
+        backend=BackendSection(type="vllm", model_path="/models/Qwen3-8B"),
+        hardware=HardwareSection(vendor="amd", model="V620", count=1, vram_gb=32),
     )
-    members = list_tar_members(out)
-    assert "artifacts/foo.json" in members
+    score = ScoreRecord(
+        kind="throughput",
+        cell_id="x",
+        status="success",
+        started_at=T0,
+        finished_at=T1,
+        metrics={"output_tok_s": 1.0},
+    )
+    (result_dir / "summary.json").write_text(
+        json.dumps({"recipe": recipe_local.model_dump(mode="json"), "scores": [score.to_dict()]})
+    )
+    from benchmark_suite.submission import build_lmx_payload
+
+    assert build_lmx_payload(result_dir=result_dir)["hfId"] == "Qwen3-8B"
+
+    recipe_hf = Recipe(
+        meta=MetaSection(name="test", description="x"),
+        backend=BackendSection(type="vllm", model_path="Qwen/Qwen3-8B"),
+        hardware=HardwareSection(vendor="amd", model="V620", count=1, vram_gb=32),
+    )
+    (result_dir / "summary.json").write_text(
+        json.dumps({"recipe": recipe_hf.model_dump(mode="json"), "scores": [score.to_dict()]})
+    )
+    assert build_lmx_payload(result_dir=result_dir)["hfId"] == "Qwen/Qwen3-8B"
 
 
-def test_export_submission_missing_summary_json_raises(tmp_path: Path) -> None:
-    """Empty result_dir → FileNotFoundError."""
+def test_build_lmx_payload_omits_optional_fields_when_absent(tmp_path: Path) -> None:
     result_dir = tmp_path / "rd"
     result_dir.mkdir()
+    recipe = Recipe(
+        meta=MetaSection(name="test", description="x"),
+        backend=BackendSection(type="external"),
+    )
+    score = ScoreRecord(
+        kind="throughput",
+        cell_id="x",
+        status="success",
+        started_at=T0,
+        finished_at=T1,
+        metrics={"output_tok_s": 42.0},
+    )
+    (result_dir / "summary.json").write_text(
+        json.dumps({"recipe": recipe.model_dump(mode="json"), "scores": [score.to_dict()]})
+    )
+    from benchmark_suite.submission import build_lmx_payload
+
+    payload = build_lmx_payload(result_dir=result_dir)
+    assert "tokSPrefill" not in payload
+    assert "ttftMs" not in payload
+    assert "peakVramGb" not in payload
+    assert "hardware" not in payload
+    assert payload["tokSOut"] == 42.0
+
+
+def test_build_lmx_payload_raises_without_output_tok_s(tmp_path: Path) -> None:
+    result_dir = tmp_path / "rd"
+    result_dir.mkdir()
+    recipe = Recipe(
+        meta=MetaSection(name="test", description="x"),
+        backend=BackendSection(type="external"),
+    )
+    (result_dir / "summary.json").write_text(
+        json.dumps({"recipe": recipe.model_dump(mode="json"), "scores": []})
+    )
+    from benchmark_suite.submission import build_lmx_payload
+
+    with pytest.raises(ValueError, match="output_tok_s"):
+        build_lmx_payload(result_dir=result_dir)
+
+
+def test_build_lmx_payload_raises_on_missing_summary(tmp_path: Path) -> None:
+    result_dir = tmp_path / "rd"
+    result_dir.mkdir()
+    from benchmark_suite.submission import build_lmx_payload
+
     with pytest.raises(FileNotFoundError):
-        cli.export_submission(
-            result_dir, submitter="alice", output=tmp_path / "sub.tar.gz"
-        )
+        build_lmx_payload(result_dir=result_dir)
+
+
+def test_build_lmx_payload_notes_truncated_to_2000(tmp_path: Path) -> None:
+    result_dir = tmp_path / "rd"
+    result_dir.mkdir()
+    recipe = Recipe(
+        meta=MetaSection(name="test", description="x"),
+        backend=BackendSection(type="external"),
+    )
+    score = ScoreRecord(
+        kind="throughput",
+        cell_id="x",
+        status="success",
+        started_at=T0,
+        finished_at=T1,
+        metrics={"output_tok_s": 1.0},
+    )
+    (result_dir / "summary.json").write_text(
+        json.dumps({"recipe": recipe.model_dump(mode="json"), "scores": [score.to_dict()]})
+    )
+    from benchmark_suite.submission import build_lmx_payload
+
+    long_notes = "x" * 3000
+    payload = build_lmx_payload(result_dir=result_dir, notes=long_notes)
+    assert len(payload["notes"]) == 2000
+
+
+def test_export_payload_writes_json_file(tmp_path: Path) -> None:
+    result_dir = tmp_path / "rd"
+    result_dir.mkdir()
+    recipe = Recipe(
+        meta=MetaSection(name="test", description="x"),
+        backend=BackendSection(type="vllm", model_path="Qwen/Qwen3-8B"),
+        hardware=HardwareSection(vendor="amd", model="Radeon PRO V620", count=1, vram_gb=32),
+    )
+    score = ScoreRecord(
+        kind="throughput",
+        cell_id="x",
+        status="success",
+        started_at=T0,
+        finished_at=T1,
+        metrics={"output_tok_s": 87.4},
+    )
+    (result_dir / "summary.json").write_text(
+        json.dumps({"recipe": recipe.model_dump(mode="json"), "scores": [score.to_dict()]})
+    )
+    out = tmp_path / "payload.json"
+    from benchmark_suite.submission import export_payload
+
+    written = export_payload(result_dir=result_dir, output=out)
+    assert written == out
+    body = json.loads(out.read_text())
+    assert body["tokSOut"] == 87.4
+    assert body["engineName"] == "vllm"
 
 
 # ----- CLI -----
 
 
 def test_cli_export_command(tmp_path: Path) -> None:
-    """`bs export` exits 0 and writes the tarball."""
     result_dir = tmp_path / "rd"
     result_dir.mkdir()
     seed_result_dir(result_dir)
-    out = tmp_path / "sub.tar.gz"
+    out = tmp_path / "payload.json"
     result = runner.invoke(
         cli.app,
-        ["export", str(result_dir), "--submitter", "alice", "-o", str(out)],
+        ["export", str(result_dir), "-o", str(out)],
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     assert out.exists()
     assert f"wrote {out}" in result.output
 
@@ -286,6 +389,6 @@ def test_cli_export_command_missing_result_dir(tmp_path: Path) -> None:
     """Non-existent result dir → typer rejects with a non-zero exit."""
     result = runner.invoke(
         cli.app,
-        ["export", str(tmp_path / "nope"), "--submitter", "alice"],
+        ["export", str(tmp_path / "nope"), "-o", str(tmp_path / "p.json")],
     )
     assert result.exit_code != 0

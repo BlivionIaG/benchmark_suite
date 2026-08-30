@@ -40,3 +40,13 @@ cell:
   linear: rdna2
   cg: 1
   mtp: 0
+hardware:
+  vendor: amd
+  model: Radeon PRO V620
+  count: 4
+  vram_gb: 32
+  cpu: EPYC 7452
+  ram_gb: 256
+  os: Ubuntu 22.04
+  power_watts: 200
+quantization: W4A16-G32
