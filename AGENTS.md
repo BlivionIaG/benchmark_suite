@@ -58,6 +58,7 @@ benchmark_suite/
 ├── cli.py                  # typer app — `bs` entry point (ALL commands)
 ├── recipe.py               # Pydantic v2 schema — Recipe, scorer configs, load_recipe
 ├── submission.py           # build_lmx_payload + submit_submission + export_payload
+├── setup.py                # bs setup: GPU detect + lmx check + API key check
 ├── paths.py                # result-dir layout helpers, ts_slug
 ├── _matrix.py              # private — cartesian axis expansion for `bs matrix`
 ├── runner/
@@ -83,7 +84,8 @@ tests/
 ├── test_recipe.py          # schema tests (incl. HardwareSection)
 ├── test_paths.py, test_matrix.py
 ├── test_export.py          # metadata_collector + build_lmx_payload + export_payload
-├── test_submit.py          # respx-mocked POST /api/speed-tests + dry-run
+├── test_submit.py          # subprocess shell-out to fake-lmx + dry-run
+├── test_setup.py           # bs setup: GPU detect, redact_key, lmx version, run_setup
 ├── test_cli.py, test_compare.py, test_report.py    # integration tests
 ├── runner/                 # endpoint + serve + llm_perf + vllm_bench tests
 ├── scoring/                # per-scorer tests
@@ -218,7 +220,7 @@ Before each commit:
 - [ ] Commit message follows Rule 2 format (What / Why / Testing body)
 - [ ] `git push origin master` after commit
 
-## 10. Submitting to localmaxxing.com (`bs submit`, `bs export`)
+## 10. Submitting to localmaxxing.com (`bs submit`, `bs export`, `bs setup`)
 
 `benchmark_suite` is a recipe + result-dir automation layer. The actual leaderboard submission is delegated to the official [LocalMaxxing CLI (`lmx`)](https://github.com/LottoLottoLotto/localmaxxing-cli).
 
@@ -229,6 +231,31 @@ lmx speed-test submit /tmp/bs-submit-XXX.json   # or dry-run
 ```
 
 `bs` does **not** make HTTP calls. Authentication, retries, rate-limit handling, and response parsing are all `lmx`'s job — we just feed it JSON.
+
+### Onboarding wizard: `bs setup`
+
+First-time users run `bs setup` once on the host that will produce benchmarks. It runs four checks in sequence and prints a summary card:
+
+| Step | What it does | Failure mode |
+|---|---|---|
+| GPU detect | Tries `lmx hardware --out <path>`; falls back to `torch.cuda.get_device_properties(0)`; writes `hardware.json` to cwd | Prints warning; doesn't fail the wizard |
+| lmx installed | `shutil.which("lmx")` (or `--lmx-bin`); reads version via `lmx --version` | **Fails** with install instructions (exit 1) |
+| API key | Checks `$LMX_API_KEY` env, then `~/.config/localmaxxing/config.json`. If missing AND a TTY is attached, spawns `lmx auth login` (opens browser) | **Fails** with auth instructions (exit 1) |
+| Summary card | Prints ✓/✗ per step + the next command to run | n/a |
+
+Flags:
+- `--no-login` — don't auto-launch `lmx auth login` even if a TTY is attached (for batch envs)
+- `--skip-auth` — skip the API-key check entirely (smoke tests)
+- `--lmx-bin <path>` — override the `lmx` binary path
+- `--hardware-out <path>` — override where `hardware.json` lands (default `./hardware.json`)
+
+Each step is independent — a GPU detection failure doesn't abort the wizard, just prints a warning.
+
+### Recipe scaffolding: `bs init --hardware`
+
+`bs init <name>` scaffolds a new recipe. With `--hardware <path>`, it reads a localmaxxing `hardware.json` and injects the matching `hardware:` block into the YAML. This is the second step of the on-ramp: `bs setup` produces `hardware.json` → `bs init --hardware ./hardware.json my-v620-bench` produces a recipe with the host's GPU pre-filled.
+
+Engine selection via `--engine vllm|llama.cpp|tgi|external` (default `vllm`).
 
 ### Flow
 
@@ -298,9 +325,10 @@ The CLI parses `lmx`'s stdout with a regex (`https?://[^\s]*?/speed-tests/([A-Za
 
 ## 11. Validation status (v1)
 
-- 223 tests passing (test_recipe + HardwareSection + test_export + test_submit rewritten to mock `lmx` via subprocess shell-out)
+- 250 tests passing (test_setup.py + test_cli.py bs setup/init --hardware added)
 - ruff + basedpyright strict: clean
 - 4 recipes shipped (gfx1030 production + cross-platform perplexity + KLD), all with `hardware:` + `quantization:` blocks
 - CI runs on `ubuntu-latest` (CPU-only) via `.github/workflows/ci.yml`
 - `bs submit` tested with a fake-lmx bash script that records argv and prints synthetic output — no `lmx` binary required in CI
+- `bs setup` tested with monkeypatched `shutil.which` + fake-lmx; the GPU-detection torch fallback uses a `_Torch` mock
 - **GPU smoke deferred**: this v1 was built while real GPUs were busy with bug investigations. Real-hardware validation is a separate session.

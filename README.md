@@ -33,29 +33,28 @@ uv sync --all-extras        # with lm-eval, promptfoo, inspect-ai, terminal-benc
 ## Quickstart
 
 ```bash
-# 1. Validate a recipe and probe the endpoint
-bs doctor recipes/qwen36-27b-gptq-tp4.yaml
+# 0. First time only: install + auth
+bs setup                       # detect GPU, verify lmx, verify API key
 
-# 2. Run a recipe end-to-end (spawns vllm if needed, runs scorers, writes summary)
-bs run recipes/qwen36-27b-gptq-tp4.yaml
+# 1. Scaffold a recipe (with detected hardware pre-filled)
+bs init my-v620-bench --hardware ./hardware.json
 
-# 3. Sweep axes — one cell per combination
-bs matrix recipes/qwen36-27b-gptq-tp4.yaml --axis cell.attn=triton,fardna2 --axis cell.linear=rdna2,exllama
+# 2. Validate a recipe and probe the endpoint
+bs doctor recipes/my-v620-bench.yaml
 
-# 4. Compare two result dirs
+# 3. Run a recipe end-to-end (spawns vllm if needed, runs scorers, writes summary)
+bs run recipes/my-v620-bench.yaml
+
+# 4. Sweep axes — one cell per combination
+bs matrix recipes/my-v620-bench.yaml --axis cell.attn=triton,fardna2 --axis cell.linear=rdna2,exllama
+
+# 5. Compare two result dirs
 bs compare results/cell_a results/cell_b
 
-# 5. Regenerate summary from existing artifacts
+# 6. Regenerate summary from existing artifacts
 bs report results/qwen36_2026-08-30/dense_fardna2_rdna2_cg1_mtp0/
 
-# 6. Scaffold a new recipe
-bs init my-new-bench
-
 # 7. Submit to the localmaxxing.com leaderboard (via the official `lmx` CLI)
-#    First-time setup (one time only):
-#      1. Install lmx: https://github.com/LottoLottoLotto/localmaxxing-cli/releases/latest
-#      2. lmx auth login   # opens browser, generates API key, saves to ~/.config/localmaxxing/
-#    Then:
 bs submit results/qwen36_2026-08-30/dense_fardna2_rdna2_cg1_mtp0/
 
 # 8. (optional) Inspect the JSON payload before submitting
@@ -77,7 +76,40 @@ lmx speed-test dry-run /tmp/bs-submit-XXX.json
 
 `bs` does **not** make HTTP calls directly. Authentication, request formatting, response parsing, retries, and rate-limit handling are all `lmx`'s responsibility.
 
+### First-time setup (`bs setup`)
+
+Run `bs setup` once on the host that will produce benchmarks. It runs four checks in sequence:
+
+1. **Detect GPU** → writes `hardware.json` (tries `lmx hardware`, falls back to torch). Edit the file later to fix any field.
+2. **Verify `lmx` is installed** → prints the resolved path + version.
+3. **Verify the API key** → checks `$LMX_API_KEY` first, then `~/.config/localmaxxing/config.json`. If missing AND a TTY is attached, spawns `lmx auth login` (browser opens for the device-flow login).
+4. **Print a summary card** with ✓ / ✗ per step + the next command to run.
+
+```bash
+$ bs setup
+
+  ✓ GPU detected: Radeon PRO V620 x4 (32 GB each)
+  ✓ lmx installed: /usr/local/bin/lmx (v1.2.3)
+  ✓ API key: bhk_1a2b**** (via LMX_API_KEY)
+
+Next: bs init my-first-bench   # scaffolds a recipe with the detected hardware
+```
+
+`bs setup --no-login` skips the browser-based `lmx auth login` (useful in CI). `bs setup --skip-auth` skips the API-key check entirely (smoke tests). `bs setup --lmx-bin /path/to/lmx` overrides the `lmx` binary location.
+
+### Scaffold a recipe (`bs init --hardware <path>`)
+
+```bash
+bs init v620-bench --hardware ./hardware.json
+# → wrote recipes/v620-bench.yaml
+#   pre-filled `hardware:` from --hardware
+```
+
+The `--hardware <path>` flag injects a complete `hardware:` block (vendor, model, count, vram_gb, cpu, ram_gb, os, power_watts) into the new recipe from a localmaxxing `hardware.json`. Without it, the recipe is bare (suitable for `backend.type: external` recipes).
+
 ### Install `lmx`
+
+If `bs setup` reports lmx is missing:
 
 ```bash
 # Linux (amd64)
@@ -332,7 +364,9 @@ scoring:
 | Command | Description |
 |---|---|
 | `bs version` | Print version and exit |
+| `bs setup [--lmx-bin] [--no-login] [--skip-auth]` | Detect GPU + verify lmx + verify API key (onboarding wizard) |
 | `bs doctor <recipe> [--dry-run]` | Validate recipe + probe endpoint + check binaries |
+| `bs init <name> [--hardware <path>] [--engine <engine>]` | Scaffold a new recipe (with hardware pre-fill from a localmaxxing `hardware.json`) |
 | `bs run <recipe>` | Execute one recipe end-to-end |
 | `bs run-all <glob>` | Execute all matching recipes serially |
 | `bs matrix <recipe> --axis k=v1,v2` | Sweep axes → one cell per combo |
@@ -340,7 +374,6 @@ scoring:
 | `bs report <result_dir>` | Regenerate summaries from artifacts |
 | `bs export <result_dir> -o <file>` | Write the localmaxxing JSON payload (no network, no `lmx`) |
 | `bs submit <result_dir> [--dry-run]` | Shell out to `lmx speed-test submit` (or `dry-run`) |
-| `bs init <name>` | Scaffold a new recipe |
 | `bs convert-logits <dir> --tokenizer <hf-id> --model-name <name> --prompts <file> --output <dir>` | One-time `f_*.fp16` → safetensors + manifest |
 
 ## Supported Backends

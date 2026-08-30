@@ -69,8 +69,8 @@ meta:
   version: "1.0.0"
   tags: []
 backend:
-  type: vllm                    # change to llamacpp / tgi / external as needed
-  model_path: /models/{name}    # fill in
+  type: {engine}                # change to llamacpp / tgi / external as needed
+  model_path: /models/{name}    # fill in (use HuggingFace org/name for localmaxxing)
 endpoint:
   url: http://127.0.0.1:8000
 resources:
@@ -95,6 +95,7 @@ cell:
   linear: triton
   cg: 0
   mtp: 0
+quantization: ""
 """
 
 
@@ -356,6 +357,81 @@ def _run_recipe(recipe_path: Path) -> int:
     return _run_recipe_object(recipe)
 
 
+# ----- setup -----
+
+
+@app.command()
+def setup(
+    hardware_out: Annotated[
+        Path | None,
+        typer.Option(
+            "--hardware-out",
+            help="Where to write hardware.json. Defaults to ./hardware.json.",
+        ),
+    ] = None,
+    lmx_bin: Annotated[
+        str | None,
+        typer.Option("--lmx-bin", help="Path to the lmx binary (when not on $PATH)."),
+    ] = None,
+    skip_auth: Annotated[
+        bool,
+        typer.Option(
+            "--skip-auth",
+            help="Skip the API-key check / login. Useful for CI smoke tests.",
+        ),
+    ] = False,
+    no_login: Annotated[
+        bool,
+        typer.Option(
+            "--no-login",
+            help="Don't auto-launch `lmx auth login` if the key is missing.",
+        ),
+    ] = False,
+) -> None:
+    """Onboarding wizard for localmaxxing.com + lmx.
+
+    Detects the host GPU, verifies lmx is installed, verifies auth,
+    and prints a summary card. Each step is independent — failures
+    are reported clearly without aborting the rest of the wizard.
+
+    After `bs setup` succeeds, run `bs init my-first-bench` to
+    scaffold a recipe with the detected hardware pre-filled.
+    """
+    from benchmark_suite.setup import LMX_AUTH_HINT, LMX_INSTALL_HINT, run_setup
+
+    result = run_setup(
+        lmx_bin=lmx_bin,
+        hardware_out=hardware_out,
+        skip_auth=skip_auth,
+        run_auth_if_missing=not no_login,
+    )
+
+    typer.echo("")
+    for step in result.steps:
+        mark = "✓" if step.ok else "✗"
+        typer.echo(f"  {mark} {step.name}: {step.summary}")
+
+    typer.echo("")
+    if not result.lmx_path:
+        typer.echo("lmx is not installed. Run:")
+        typer.echo(LMX_INSTALL_HINT)
+        raise typer.Exit(code=1)
+
+    if not result.api_key_prefix:
+        typer.echo("No API key found. Authenticate with:")
+        typer.echo(LMX_AUTH_HINT)
+        raise typer.Exit(code=1)
+
+    if result.hardware is None:
+        typer.echo(
+            "No GPU detected. Pass --hardware <path> or run on a machine with a GPU."
+        )
+
+    typer.echo(
+        "Next: bs init my-first-bench   # scaffolds a recipe with the detected hardware"
+    )
+
+
 @app.command()
 def run(
     recipe: Annotated[
@@ -508,8 +584,27 @@ def report(
 @app.command()
 def init(
     name: Annotated[str, typer.Argument(help="Recipe slug; writes recipes/<name>.yaml.")],
+    hardware: Annotated[
+        Path | None,
+        typer.Option(
+            "--hardware",
+            help="Path to a localmaxxing hardware.json (e.g. from `bs setup`) "
+            "to pre-fill the recipe's `hardware:` block.",
+        ),
+    ] = None,
+    engine: Annotated[
+        str,
+        typer.Option(
+            "--engine",
+            help="Inference engine for the recipe (`vllm` / `llama.cpp` / `tgi` / `external`).",
+        ),
+    ] = "vllm",
 ) -> None:
-    """Scaffold a new recipe at recipes/<name>.yaml."""
+    """Scaffold a new recipe at recipes/<name>.yaml.
+
+    If `--hardware hardware.json` is provided, the recipe's `hardware:`
+    and `quantization:` blocks are pre-filled from it.
+    """
     if not SLUG_RE.match(name):
         typer.echo(f"error: name must be a slug [a-z0-9-_], got {name!r}", err=True)
         raise typer.Exit(code=1)
@@ -517,9 +612,88 @@ def init(
     if target.exists():
         typer.echo(f"error: already exists: {target}", err=True)
         raise typer.Exit(code=1)
+
+    hw_block = ""
+    quant_block = "FP16"
+    if hardware is not None:
+        if not hardware.exists():
+            typer.echo(f"error: --hardware {hardware} does not exist", err=True)
+            raise typer.Exit(code=1)
+        hw_block = _hardware_yaml_block(hardware)
+        if not hw_block:
+            typer.echo(
+                f"warning: {hardware} is empty or invalid; recipe will lack a hardware: block",
+                err=True,
+            )
+
+    body = _RECIPE_TEMPLATE.format(name=name, engine=engine)
+    if hw_block:
+        body = body + hw_block
+    body = body.replace('quantization: ""', f"quantization: {quant_block}", 1)
+
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(_RECIPE_TEMPLATE.format(name=name))
+    target.write_text(body)
     typer.echo(f"wrote {target}")
+    if hw_block:
+        typer.echo("  pre-filled `hardware:` from --hardware")
+
+
+def _hardware_yaml_block(hardware_json: Path) -> str:
+    """Build the `hardware:` YAML block from a localmaxxing hardware.json file."""
+    import yaml
+
+    try:
+        data = yaml.safe_load(hardware_json.read_text())
+    except (yaml.YAMLError, OSError) as exc:
+        typer.echo(f"error: could not parse {hardware_json}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not isinstance(data, dict):
+        return ""
+    data_dict = cast("dict[str, object]", data)
+
+    vendor = _hwclass_to_vendor(data_dict.get("hwClass"))
+    block = ["", "hardware:"]
+    if vendor:
+        block.append(f"  vendor: {vendor}")
+    if (name := data_dict.get("gpuName")):
+        block.append(f"  model: {name!r}")
+    if (count := data_dict.get("gpuCount")):
+        block.append(f"  count: {_as_int(count)}")
+    if (vram := data_dict.get("vramGb")):
+        block.append(f"  vram_gb: {_as_int(vram)}")
+    if (cpu := data_dict.get("cpu")):
+        block.append(f"  cpu: {cpu!r}")
+    if (ram := data_dict.get("ramGb")):
+        block.append(f"  ram_gb: {_as_int(ram)}")
+    if (os_name := data_dict.get("os")):
+        block.append(f"  os: {os_name!r}")
+    if (power := data_dict.get("powerWatts")):
+        block.append(f"  power_watts: {_as_int(power)}")
+    if len(block) <= 1:
+        return ""
+    return "\n".join(block) + "\n"
+
+
+def _as_int(value: object) -> int:
+    """Coerce an `object` (typically `int | str`) to `int`; raises on bad input."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    return int(str(value))
+
+
+def _hwclass_to_vendor(hw_class: object) -> str:
+    mapping = {
+        "DISCRETE_GPU": "amd",
+    }
+    if not isinstance(hw_class, str):
+        return ""
+    if hw_class == "DISCRETE_GPU":
+        return "amd"
+    if hw_class in {"UNIFIED", "CPU_ONLY"}:
+        return "other"
+    return mapping.get(hw_class, "")
 
 
 # ----- convert-logits -----

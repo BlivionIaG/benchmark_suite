@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,38 @@ T0 = datetime(2026, 8, 30, 12, 0, 0, tzinfo=UTC)
 T1 = datetime(2026, 8, 30, 12, 5, 0, tzinfo=UTC)
 
 runner = CliRunner()
+
+
+def _which_never() -> Callable[[str], str | None]:
+    def _w(name: str) -> str | None:
+        return None
+
+    return _w
+
+
+def _which_returns(fake: Path) -> Callable[[str], str | None]:
+    def _w(name: str) -> str | None:
+        return str(fake) if name == "lmx" else None
+
+    return _w
+
+
+def _stub_hw_v620(out: Path) -> dict[str, object]:
+    return {
+        "hwClass": "DISCRETE_GPU",
+        "gpuName": "Radeon PRO V620",
+        "gpuCount": 4,
+        "vramGb": 32,
+    }
+
+
+def _stub_hw_basic(out: Path) -> dict[str, object]:
+    return {
+        "hwClass": "DISCRETE_GPU",
+        "gpuName": "X",
+        "gpuCount": 1,
+        "vramGb": 8,
+    }
 
 
 # ----- shared helpers -----
@@ -544,3 +578,148 @@ def test_convert_logits_malformed_jsonl_exits_1(
     )
     assert result.exit_code == 1
     assert called is False
+
+
+# ----- bs setup -----
+
+
+def test_cli_setup_help() -> None:
+    result = runner.invoke(cli.app, ["setup", "--help"])
+    assert result.exit_code == 0
+    assert "--lmx-bin" in result.output
+    assert "--hardware-out" in result.output
+    assert "--no-login" in result.output
+    assert "--skip-auth" in result.output
+    assert "lmx" in result.output.lower()
+
+
+def test_cli_setup_exits_zero_when_all_steps_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_lmx = tmp_path / "fake-lmx"
+    fake_lmx.write_text("#!/usr/bin/env bash\necho 'lmx 1.0.0'\n")
+    fake_lmx.chmod(0o755)
+    monkeypatch.setattr("shutil.which", _which_returns(fake_lmx))
+    monkeypatch.setenv("LMX_API_KEY", "bhk_abcdefghij")
+    monkeypatch.setattr(
+        "benchmark_suite.setup.detect_hardware",
+        _stub_hw_v620,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "setup",
+            "--lmx-bin", str(fake_lmx),
+            "--no-login",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Radeon PRO V620" in result.output
+    assert "bhk_abcd****" in result.output
+    assert "Next: bs init my-first-bench" in result.output
+
+
+def test_cli_setup_exits_one_when_lmx_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("shutil.which", _which_never())
+    monkeypatch.setenv("LMX_API_KEY", "bhk_test")
+    monkeypatch.setattr(
+        "benchmark_suite.setup.detect_hardware",
+        _stub_hw_basic,
+    )
+
+    result = runner.invoke(cli.app, ["setup"])
+
+    assert result.exit_code == 1
+    assert "lmx is not installed" in result.output
+
+
+def test_cli_setup_exits_one_when_api_key_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_lmx = tmp_path / "fake-lmx"
+    fake_lmx.write_text("#!/usr/bin/env bash\necho 'lmx 1.0.0'\n")
+    fake_lmx.chmod(0o755)
+    monkeypatch.setattr("shutil.which", _which_returns(fake_lmx))
+    monkeypatch.delenv("LMX_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "benchmark_suite.setup.LMX_CONFIG_PATH", Path("/tmp/no-such-config.json")
+    )
+    monkeypatch.setattr(
+        "benchmark_suite.setup.detect_hardware",
+        _stub_hw_basic,
+    )
+
+    result = runner.invoke(cli.app, ["setup", "--lmx-bin", str(fake_lmx), "--no-login"])
+
+    assert result.exit_code == 1
+    assert "No API key found" in result.output
+
+
+# ----- bs init --hardware -----
+
+
+def test_cli_init_writes_recipe_without_hardware(tmp_path: Path) -> None:
+    cwd_before = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        result = runner.invoke(cli.app, ["init", "test-recipe"])
+    finally:
+        os.chdir(cwd_before)
+
+    assert result.exit_code == 0, result.output
+    recipe_path = tmp_path / "recipes" / "test-recipe.yaml"
+    assert recipe_path.exists()
+    body = recipe_path.read_text()
+    assert "backend:" in body
+    assert "type: vllm" in body
+    assert "quantization:" in body
+    assert "hardware:" not in body
+
+
+def test_cli_init_prefills_hardware_block(tmp_path: Path) -> None:
+    hardware_json = tmp_path / "hardware.json"
+    hardware_json.write_text(json.dumps({
+        "hwClass": "DISCRETE_GPU",
+        "gpuName": "Radeon PRO V620",
+        "gpuCount": 4,
+        "vramGb": 32,
+        "cpu": "EPYC 7452",
+        "ramGb": 256,
+        "os": "Ubuntu 22.04",
+        "powerWatts": 200,
+    }))
+
+    cwd_before = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        result = runner.invoke(cli.app, ["init", "v620-bench", "--hardware", str(hardware_json)])
+    finally:
+        os.chdir(cwd_before)
+
+    assert result.exit_code == 0, result.output
+    recipe_path = tmp_path / "recipes" / "v620-bench.yaml"
+    assert recipe_path.exists()
+    body = recipe_path.read_text()
+    assert "hardware:" in body
+    assert "vendor: amd" in body
+    assert "model: 'Radeon PRO V620'" in body
+    assert "count: 4" in body
+    assert "vram_gb: 32" in body
+    assert "cpu: 'EPYC 7452'" in body
+    assert "power_watts: 200" in body
+
+
+def test_cli_init_rejects_invalid_slug(tmp_path: Path) -> None:
+    cwd_before = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        result = runner.invoke(cli.app, ["init", "INVALID NAME WITH SPACES"])
+    finally:
+        os.chdir(cwd_before)
+
+    assert result.exit_code == 1
+    assert "slug" in result.output.lower()
