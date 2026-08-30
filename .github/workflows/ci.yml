@@ -1,0 +1,44 @@
+name: CI
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: Sync dependencies
+        run: uv sync --extra dev
+      - name: Run pytest
+        run: uv run pytest tests/ -q
+      - name: Run ruff
+        run: uv run ruff check .
+      - name: Run basedpyright (strict)
+        run: uv run basedpyright benchmark_suite/ tests/
+      - name: Validate recipes load
+        run: uv run pytest tests/test_recipes.py -v
+      - name: Smoke test bs doctor --dry-run
+        run: |
+          cat > /tmp/mock-recipe.yaml <<'YAML'
+          meta:
+            name: ci-smoke
+            description: CI smoke test recipe
+          backend:
+            type: external
+          endpoint:
+            url: http://127.0.0.1:9   # intentionally unreachable; --dry-run always exits 0
+          bench:
+            scoring: []
+          YAML
+          uv run bs doctor /tmp/mock-recipe.yaml --dry-run

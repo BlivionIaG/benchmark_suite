@@ -1,0 +1,24 @@
+meta:
+  name: perplexity-compare
+  description: Perplexity on wikitext-2 via /v1/completions — works against any OpenAI-compatible endpoint (vLLM, llama.cpp, OpenAI API)
+  version: "1.0.0"
+  tags: [cross-platform, perplexity, wikitext]
+backend:
+  type: external
+endpoint:
+  url: http://127.0.0.1:8000
+  timeout_s: 1800
+resources:
+  tensor_parallel_size: 1
+bench:
+  load: {}
+  scoring:
+    - kind: perplexity
+      tasks: [wikitext]
+      num_fewshot: 0
+cell:
+  family: dense
+  attn: external
+  linear: external
+  cg: 0
+  mtp: 0

@@ -1,0 +1,41 @@
+meta:
+  name: qwen36-35b-a3b-fp16-tp4
+  description: Qwen3.6-35B-A3B MoE FP16 reference on 4x V620 — baseline for quantization comparison
+  version: "1.0.0"
+  tags: [gfx1030, moe, fp16, tp4, baseline]
+backend:
+  type: vllm
+  model_path: /models/Qwen3.6-35B-A3B-FP16
+  vllm:
+    language-model-only: true
+    skip-mm-profiling: true
+    trust-remote-code: true
+endpoint:
+  url: http://127.0.0.1:8000
+resources:
+  tensor_parallel_size: 4
+  gpu_memory_utilization: 0.85
+  max_model_len: 18432
+  max_num_seqs: 8
+  dtype: float16
+  devices: "0,1,2,3"
+runtime:
+  env:
+    VLLM_USE_V2_MODEL_RUNNER: "1"
+    VLLM_USE_RDNA_FUSED_MOE: "1"
+  startup_wait_s: 1500
+bench:
+  load:
+    concurrencies: [1, 4, 8, 16]
+    num_prompts: 32
+    input_len: 1024
+    output_len: 256
+  scoring:
+    - kind: throughput
+      tool: llm-perf
+cell:
+  family: moe
+  attn: triton
+  linear: triton
+  cg: 1
+  mtp: 0

@@ -1,0 +1,26 @@
+# PREREQUISITE: run `bs convert-logits <your-fp16-logs-dir> --tokenizer <hf-id> --model-name <name> --prompts prompts.jsonl --output ./kl_reference_cache` first.
+# The KLD scorer refuses to run if manifest.json is missing or vocab doesn't match the endpoint tokenizer.
+meta:
+  name: kld-vs-fp16-reference
+  description: KLD divergence vs fp16 reference cache (after `bs convert-logits`) — metadata-tolerant, vocab-checked
+  version: "1.0.0"
+  tags: [gfx1030, kld, quality, requires-converted-cache]
+backend:
+  type: external
+endpoint:
+  url: http://127.0.0.1:8000
+bench:
+  load: {}
+  scoring:
+    - kind: kld
+      source: logits_dir
+      reference_logits_dir: ./kl_reference_cache    # produced by `bs convert-logits`
+      top_k: 128
+      max_tokens: 1
+      vocab_check: true
+cell:
+  family: dense
+  attn: external
+  linear: external
+  cg: 0
+  mtp: 0

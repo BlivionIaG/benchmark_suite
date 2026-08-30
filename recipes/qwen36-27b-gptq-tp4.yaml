@@ -1,0 +1,42 @@
+meta:
+  name: qwen36-27b-gptq-tp4
+  description: Qwen3.6-27B-GPTQ-W4A16-G32 on 4x Radeon PRO V620 (gfx1030) — canonical production cell
+  version: "1.0.0"
+  tags: [gfx1030, gptq, w4a16, tp4, production]
+backend:
+  type: vllm
+  model_path: /models/Qwen3.6-27B-GPTQ-W4A16-G32
+  vllm:
+    compilation-config: '{"cudagraph_mode": "FULL_AND_PIECEWISE", "compile_ranges_endpoints": []}'
+    language-model-only: true
+    skip-mm-profiling: true
+    trust-remote-code: true
+endpoint:
+  url: http://127.0.0.1:8000
+resources:
+  tensor_parallel_size: 4
+  gpu_memory_utilization: 0.85
+  max_model_len: 2048
+  max_num_seqs: 8
+  dtype: float16
+  devices: "0,1,2,3"
+runtime:
+  env:
+    VLLM_USE_V2_MODEL_RUNNER: "1"
+    VLLM_USE_RDNA2_FA: "1"
+  startup_wait_s: 1200
+bench:
+  load:
+    concurrencies: [1, 4, 8, 16]
+    num_prompts: 32
+    input_len: 256
+    output_len: 64
+  scoring:
+    - kind: throughput
+      tool: llm-perf
+cell:
+  family: dense
+  attn: fardna2
+  linear: rdna2
+  cg: 1
+  mtp: 0
