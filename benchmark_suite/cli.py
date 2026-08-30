@@ -10,9 +10,11 @@ ScorerRegistry so `bs run` can build whichever scorers a recipe lists.
 """
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
+import tarfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, TypedDict, assert_never, cast
@@ -49,6 +51,12 @@ from benchmark_suite.scoring import (  # noqa: F401
     throughput,  # pyright: ignore[reportUnusedImport]
 )
 from benchmark_suite.scoring.base import ScoreRecord, ScorerRegistry, ScoreStatus
+from benchmark_suite.scoring.metadata_collector import (
+    build_metadata,
+    collect_hardware,
+    collect_model_info,
+    collect_software,
+)
 from benchmark_suite.tools.convert_kl_logits import convert_logit_cache
 
 app = typer.Typer(
@@ -584,6 +592,183 @@ def convert_logits_cmd(
     )
     typer.echo(f"wrote {manifest.prompt_count} prompt shards to {output}")
     typer.echo(f"manifest: {output}/manifest.json")
+
+
+# ----- export -----
+
+_ARTIFACT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB per-file cap for bundled artifacts
+
+
+def _merge_metadata(
+    overrides: dict[str, object] | None,
+    *,
+    auto_detect: bool,
+    model_path: str,
+) -> dict[str, Any]:
+    """Assemble the metadata dict: auto-detect (optional) merged with overrides.
+
+    Overrides win over auto-detected values. When auto_detect is False, only
+    the overrides (plus required submitter/date) are present.
+    """
+    hardware: dict[str, Any] = collect_hardware() if auto_detect else {}
+    software: dict[str, Any] = collect_software() if auto_detect else {}
+    model: dict[str, str] = collect_model_info(model_path) if auto_detect else {}
+
+    if overrides:
+        for section in ("hardware", "software", "model"):
+            extra = overrides.get(section)
+            if isinstance(extra, dict):
+                target = {"hardware": hardware, "software": software, "model": model}[section]
+                target.update(cast("dict[str, Any]", extra))
+
+    return {"hardware": hardware, "software": software, "model": model}
+
+
+def export_submission(
+    result_dir: Path,
+    *,
+    submitter: str,
+    output: Path,
+    metadata_overrides: dict[str, object] | None = None,
+    auto_detect: bool = False,
+) -> Path:
+    """Bundle result_dir + recipe + metadata into a gzipped tar at `output`.
+
+    Reads from result_dir: summary.json (recipe + scores), summary.csv,
+    README.md. Reconstructs recipe.yaml from summary.json["recipe"]. Auto-detects
+    hardware/software/model when auto_detect=True, merged with metadata_overrides
+    (overrides win). Bundles artifacts/ files under 10 MB each.
+
+    Returns the path to the created tarball.
+    """
+    if not submitter:
+        raise ValueError("submitter is required and must be non-empty")
+
+    summary_json = result_dir / "summary.json"
+    if not summary_json.exists():
+        raise FileNotFoundError(f"no summary.json in {result_dir}")
+
+    data: Any = json.loads(summary_json.read_text())
+    recipe_dict: dict[str, Any] = data["recipe"]
+    recipe_yaml = yaml.safe_dump(recipe_dict, sort_keys=False)
+
+    model_path = str(recipe_dict.get("backend", {}).get("model_path", ""))
+    sections = _merge_metadata(
+        metadata_overrides, auto_detect=auto_detect, model_path=model_path
+    )
+    metadata = build_metadata(
+        submitter=submitter,
+        date_str=datetime.now(UTC).date().isoformat(),
+        hardware=sections["hardware"],
+        software=sections["software"],
+        model=sections["model"],
+        notes=str(metadata_overrides.get("notes", "")) if metadata_overrides else "",
+    )
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(output, "w:gz") as tf:
+        # recipe.yaml reconstructed from summary.json.
+        recipe_info = tarfile.TarInfo("recipe.yaml")
+        recipe_bytes = recipe_yaml.encode()
+        recipe_info.size = len(recipe_bytes)
+        tf.addfile(recipe_info, io.BytesIO(recipe_bytes))
+
+        # summary.csv / summary.json / README.md copied as-is.
+        for name in ("summary.csv", "summary.json", "README.md"):
+            src = result_dir / name
+            if src.exists():
+                tf.add(src, arcname=name)
+
+        # metadata.json written from the assembled metadata.
+        metadata_bytes = (json.dumps(metadata, indent=2) + "\n").encode()
+        metadata_info = tarfile.TarInfo("metadata.json")
+        metadata_info.size = len(metadata_bytes)
+        tf.addfile(metadata_info, io.BytesIO(metadata_bytes))
+
+        # artifacts/ files under the size cap.
+        artifacts_dir = result_dir / "artifacts"
+        if artifacts_dir.is_dir():
+            for artifact in sorted(artifacts_dir.rglob("*")):
+                if not artifact.is_file():
+                    continue
+                if artifact.stat().st_size > _ARTIFACT_MAX_BYTES:
+                    typer.echo(
+                        f"warning: skipping {artifact} (>10 MB)", err=True
+                    )
+                    continue
+                tf.add(artifact, arcname=str(artifact.relative_to(result_dir)))
+
+    return output
+
+
+@app.command()
+def export(
+    result_dir: Annotated[
+        Path, typer.Argument(exists=True, file_okay=False, help="Result dir produced by `bs run`.")
+    ],
+    submitter: Annotated[
+        str, typer.Option("--submitter", help="GitHub handle of the contributor.")
+    ],
+    output: Annotated[
+        Path, typer.Option("--output", "-o", help="Path to write the submission tarball (.tar.gz).")
+    ],
+    hardware_gpu: Annotated[str, typer.Option("--hardware-gpu")] = "",
+    hardware_gpu_count: Annotated[int, typer.Option("--hardware-gpu-count")] = 0,
+    hardware_vram_gb: Annotated[int, typer.Option("--hardware-vram-gb", min=0)] = 0,
+    hardware_cpu: Annotated[str, typer.Option("--hardware-cpu")] = "",
+    hardware_ram_gb: Annotated[int, typer.Option("--hardware-ram-gb", min=0)] = 0,
+    software_os: Annotated[str, typer.Option("--software-os")] = "",
+    software_kernel: Annotated[str, typer.Option("--software-kernel")] = "",
+    software_rocm: Annotated[str, typer.Option("--software-rocm")] = "",
+    software_vllm: Annotated[str, typer.Option("--software-vllm")] = "",
+    software_python: Annotated[str, typer.Option("--software-python")] = "",
+    model_hf_repo: Annotated[str, typer.Option("--model-hf-repo")] = "",
+    model_hf_commit: Annotated[str, typer.Option("--model-hf-commit")] = "",
+    notes: Annotated[str, typer.Option("--notes")] = "",
+    auto_detect: Annotated[bool, typer.Option("--auto-detect")] = False,
+) -> None:
+    """Bundle a result dir into a standardized submission tarball for the leaderboard."""
+    metadata_overrides: dict[str, object] = {
+        "hardware": {
+            k: v
+            for k, v in {
+                "gpu": hardware_gpu,
+                "gpu_count": hardware_gpu_count or None,
+                "vram_gb": hardware_vram_gb or None,
+                "cpu": hardware_cpu,
+                "ram_gb": hardware_ram_gb or None,
+            }.items()
+            if v not in (None, "")
+        },
+        "software": {
+            k: v
+            for k, v in {
+                "os": software_os,
+                "kernel": software_kernel,
+                "rocm": software_rocm,
+                "vllm": software_vllm,
+                "python": software_python,
+            }.items()
+            if v not in (None, "")
+        },
+        "model": {
+            k: v
+            for k, v in {
+                "hf_repo": model_hf_repo,
+                "hf_commit": model_hf_commit,
+            }.items()
+            if v not in (None, "")
+        },
+        "notes": notes,
+    }
+    out = export_submission(
+        result_dir=result_dir,
+        submitter=submitter,
+        output=output,
+        metadata_overrides=metadata_overrides,
+        auto_detect=auto_detect,
+    )
+    typer.echo(f"wrote {out}")
 
 
 if __name__ == "__main__":
