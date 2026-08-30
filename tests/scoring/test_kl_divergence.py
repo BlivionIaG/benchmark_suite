@@ -194,7 +194,7 @@ def test_kld_scorer_handles_missing_manifest_gracefully(tmp_path: Path) -> None:
     config = KLDScorer.model_validate(
         {"kind": "kld", "source": "logits_dir", "reference_logits_dir": empty}
     )
-    impl = KLDScorerImpl(config)  # type: ignore[reportCallIssue]
+    impl = KLDScorerImpl(config)
     record = impl.score(_recipe(), result_dir=tmp_path)
     assert record.status == ScoreStatus.FAILURE
     assert record.error is not None
@@ -260,7 +260,7 @@ def test_kld_scorer_logits_dir_path(
             "top_k": VOCAB,
         }
     )
-    impl = KLDScorerImpl(config)  # type: ignore[reportCallIssue]
+    impl = KLDScorerImpl(config)
     record = impl.score(_recipe(), result_dir=tmp_path)
     assert record.status == ScoreStatus.SUCCESS
     assert record.metrics["mean_kl"] == pytest.approx(0.0, abs=1e-5)
@@ -285,7 +285,7 @@ def test_kld_scorer_llm_perf_source_path(
     monkeypatch.setattr(
         "benchmark_suite.scoring.kl_divergence.run_llm_perf_kl_divergence", fake_run_kl
     )
-    impl = KLDScorerImpl(config)  # type: ignore[reportCallIssue]
+    impl = KLDScorerImpl(config)
     record = impl.score(_recipe(), result_dir=tmp_path)
     assert record.status == ScoreStatus.SUCCESS
     assert record.metrics["kl_divergence"] == pytest.approx(0.42)
