@@ -1,4 +1,5 @@
 name: CI
+
 on:
   push:
     branches: [master]
@@ -8,26 +9,28 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.13"]
+    env:
+      UV_FROZEN: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+      - name: Set up Python
+        run: uv python install 3.13
       - name: Sync dependencies
-        run: uv sync --extra dev
+        run: uv sync --extra dev --frozen
       - name: Run pytest
         run: uv run pytest tests/ -q
       - name: Run ruff
         run: uv run ruff check .
       - name: Run basedpyright (strict)
         run: uv run basedpyright benchmark_suite/ tests/
-      - name: Validate recipes load
-        run: uv run pytest tests/test_recipes.py -v
       - name: Smoke test bs doctor --dry-run
         run: |
           cat > /tmp/mock-recipe.yaml <<'YAML'
