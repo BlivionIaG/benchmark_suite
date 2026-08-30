@@ -1,0 +1,1 @@
+"""benchmark_suite/tools — one-time CLI utilities (logit-cache conversion)."""
