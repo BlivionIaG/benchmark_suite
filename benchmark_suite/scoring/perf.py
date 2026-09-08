@@ -51,12 +51,13 @@ def cached_tokens_from_usage(usage: object) -> int | None:
     if not isinstance(usage, dict):
         return None
     data = cast(dict[str, Any], usage)
-    details = data.get("prompt_tokens_details")
-    if isinstance(details, dict):
-        cached = details.get("cached_tokens")
-        if isinstance(cached, (int, float)):
-            return int(cached)
-    cached_top = data.get("cached_tokens")
+    details_obj: object = data.get("prompt_tokens_details")
+    if isinstance(details_obj, dict):
+        details = cast(dict[str, Any], details_obj)
+        cached_obj: object = details.get("cached_tokens")
+        if isinstance(cached_obj, (int, float)):
+            return int(cached_obj)
+    cached_top: object = data.get("cached_tokens")
     if isinstance(cached_top, (int, float)):
         return int(cached_top)
     return None

@@ -8,7 +8,7 @@ import statistics
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -30,6 +30,20 @@ from benchmark_suite.workloads.session_catalog import (
     workspace_blob,
 )
 from benchmark_suite.workloads.tokens import content_tokens, pad_last_user_to_total
+
+
+def _float_field(row: dict[str, Any], key: str) -> float | None:
+    value: object = row.get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _int_field(row: dict[str, Any], key: str) -> int | None:
+    value: object = row.get(key)
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
 
 
 def _fmean(xs: list[float]) -> float | None:
@@ -155,30 +169,31 @@ class SessionScorerImpl(Scorer):
             turn_cached: list[int] = []
             turn_kv: list[float] = []
             for session in session_rows:
-                turns_obj = session.get("turns_detail", [])
+                turns_obj: object = session.get("turns_detail", [])
                 if not isinstance(turns_obj, list):
                     continue
-                for turn in turns_obj:
-                    if not isinstance(turn, dict):
+                for turn_obj in cast(list[object], turns_obj):
+                    if not isinstance(turn_obj, dict):
                         continue
-                    ttft = turn.get("ttft_ms")
-                    if isinstance(ttft, (int, float)):
-                        turn_ttft.append(float(ttft))
-                    tpot = turn.get("tpot_ms")
-                    if isinstance(tpot, (int, float)):
-                        turn_tpot.append(float(tpot))
-                    prefill = turn.get("prefill_tok_s")
-                    if isinstance(prefill, (int, float)):
-                        turn_prefill.append(float(prefill))
-                    decode = turn.get("decode_tok_s")
-                    if isinstance(decode, (int, float)):
-                        turn_decode.append(float(decode))
-                    cached = turn.get("cached_tokens")
-                    if isinstance(cached, (int, float)):
-                        turn_cached.append(int(cached))
-                    kv = turn.get("kv_cache_perc")
-                    if isinstance(kv, (int, float)):
-                        turn_kv.append(float(kv))
+                    turn = cast(dict[str, Any], turn_obj)
+                    ttft = _float_field(turn, "ttft_ms")
+                    if ttft is not None:
+                        turn_ttft.append(ttft)
+                    tpot = _float_field(turn, "tpot_ms")
+                    if tpot is not None:
+                        turn_tpot.append(tpot)
+                    prefill = _float_field(turn, "prefill_tok_s")
+                    if prefill is not None:
+                        turn_prefill.append(prefill)
+                    decode = _float_field(turn, "decode_tok_s")
+                    if decode is not None:
+                        turn_decode.append(decode)
+                    cached = _int_field(turn, "cached_tokens")
+                    if cached is not None:
+                        turn_cached.append(cached)
+                    kv = _float_field(turn, "kv_cache_perc")
+                    if kv is not None:
+                        turn_kv.append(kv)
 
             metrics: dict[str, float | int | str] = {
                 "session_turns": total_turns,

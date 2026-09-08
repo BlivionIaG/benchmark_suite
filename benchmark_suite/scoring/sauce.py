@@ -85,17 +85,18 @@ def write_sauce_timeseries(result_dir: Path, artifacts: dict[str, str]) -> None:
         path = artifacts_dir / fname
         if not path.is_file():
             continue
-        data: Any = json.loads(path.read_text())
-        if not isinstance(data, dict):
+        loaded: object = json.loads(path.read_text())
+        if not isinstance(loaded, dict):
             continue
-        raw_events = data.get("events")
+        data = cast(dict[str, Any], loaded)
+        raw_events: object = data.get("events")
         if isinstance(raw_events, list):
-            for item in raw_events:
+            for item in cast(list[object], raw_events):
                 if isinstance(item, dict):
                     events.append(cast(dict[str, Any], item))
-        raw_samples = data.get("samples")
+        raw_samples: object = data.get("samples")
         if isinstance(raw_samples, list):
-            for item in raw_samples:
+            for item in cast(list[object], raw_samples):
                 if isinstance(item, dict):
                     samples.append(cast(dict[str, Any], item))
     if not events and not samples:

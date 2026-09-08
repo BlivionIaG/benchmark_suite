@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,6 +21,23 @@ from benchmark_suite.workloads.session_catalog import (
 )
 
 ENDPOINT = "http://127.0.0.1:8000"
+
+
+def _metric_n(metrics: dict[str, float | int | str], key: str) -> float:
+    value = metrics[key]
+    assert isinstance(value, (int, float))
+    return float(value)
+
+
+def _json_obj(path: Path) -> dict[str, Any]:
+    data: object = json.loads(path.read_text())
+    assert isinstance(data, dict)
+    return cast(dict[str, Any], data)
+
+
+def _json_list(obj: object) -> list[object]:
+    assert isinstance(obj, list)
+    return cast(list[object], obj)
 
 
 def _ok_response() -> httpx.Response:
@@ -292,12 +310,12 @@ def test_session_http_failure_marks_session_failed(
 
 
 def test_session_records_per_turn_latency_and_timeseries(
-    respx_mock: respx.MockRouter, tmp_path: Path
+    respx_mock: respx.MockRouter,
+    tmp_path: Path,
+    remock_kv: Callable[[httpx.Response], None],
 ) -> None:
     respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(return_value=_ok_response())
-    respx_mock.get(f"{ENDPOINT}/metrics").mock(
-        return_value=httpx.Response(200, text="vllm:gpu_cache_usage_perc 0.4\n")
-    )
+    remock_kv(httpx.Response(200, text="vllm:gpu_cache_usage_perc 0.4\n"))
     recipe = _recipe(
         stream=False,
         n_sessions=1,
@@ -310,24 +328,24 @@ def test_session_records_per_turn_latency_and_timeseries(
     rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
     assert rec.status == ScoreStatus.SUCCESS
     assert rec.metrics["session_turns"] == 3
-    assert rec.metrics["session_ttft_mean_ms"] > 0
-    assert rec.metrics["session_prefill_tok_s"] > 0
+    assert _metric_n(rec.metrics, "session_ttft_mean_ms") > 0
+    assert _metric_n(rec.metrics, "session_prefill_tok_s") > 0
     assert rec.metrics["session_kv_cache_perc"] == 40.0
     assert rec.metrics["kv_cache_perc"] == 40.0
-    data = json.loads((tmp_path / "artifacts" / "session_sessions.json").read_text())
-    turns = data["sessions"][0]["turns_detail"]
-    assert isinstance(turns, list)
+    data = _json_obj(tmp_path / "artifacts" / "session_sessions.json")
+    sessions = _json_list(data["sessions"])
+    first_session = cast(dict[str, Any], sessions[0])
+    turns = _json_list(first_session["turns_detail"])
     assert len(turns) == 3
     first = cast(dict[str, Any], turns[0])
     assert first["turn"] == 0
     assert "ttft_ms" in first
     assert "prefill_tok_s" in first
     assert first["kv_cache_perc"] == 40.0
-    ts = json.loads((tmp_path / "artifacts" / "session_timeseries.json").read_text())
-    events = ts["events"]
-    assert isinstance(events, list)
+    ts = _json_obj(tmp_path / "artifacts" / "session_timeseries.json")
+    events = _json_list(ts["events"])
     assert len(events) == 3
     assert cast(dict[str, Any], events[0])["phase"] == "session"
     assert cast(dict[str, Any], events[1])["turn"] == 1
-    sauce_ts = json.loads((tmp_path / "artifacts" / "sauce_timeseries.json").read_text())
-    assert len(sauce_ts["events"]) == 3
+    sauce_ts = _json_obj(tmp_path / "artifacts" / "sauce_timeseries.json")
+    assert len(_json_list(sauce_ts["events"])) == 3

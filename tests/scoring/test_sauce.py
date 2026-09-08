@@ -244,8 +244,15 @@ def test_sauce_runs_chat_then_session(
     assert "session" in rec.notes
     sauce_ts = tmp_path / "artifacts" / "sauce_timeseries.json"
     assert sauce_ts.is_file()
-    payload = json.loads(sauce_ts.read_text())
-    events = payload["events"]
-    assert isinstance(events, list)
-    phases = {cast(dict[str, Any], e)["phase"] for e in events if isinstance(e, dict)}
+    payload_obj: object = json.loads(sauce_ts.read_text())
+    assert isinstance(payload_obj, dict)
+    payload = cast(dict[str, Any], payload_obj)
+    events_obj: object = payload["events"]
+    assert isinstance(events_obj, list)
+    events = cast(list[object], events_obj)
+    phases = {
+        str(cast(dict[str, Any], item)["phase"])
+        for item in events
+        if isinstance(item, dict)
+    }
     assert phases == {"chat", "session"}

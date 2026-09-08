@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
+import respx
 import yaml
 
 # Rich/typer colorize dash-separated option names (`--lmx-bin` becomes
@@ -26,18 +27,31 @@ def strip_ansi() -> Callable[[str], str]:
 
 
 @pytest.fixture(autouse=True)
-def _mock_kv_metrics_endpoint(request: pytest.FixtureRequest) -> None:
+def _mock_kv_metrics_endpoint(  # pyright: ignore[reportUnusedFunction]
+    request: pytest.FixtureRequest,
+) -> None:
     """Sauce polls GET /metrics after waves/turns; default 404 so KV is omitted.
 
-    Tests that need a real KV sample register a more specific route afterwards
-    (respx matches last-registered first).
+    Tests that need a real sample use the ``remock_kv`` fixture (respx matches
+    first-registered, so a second GET /metrics route would not win).
     """
     if "respx_mock" not in request.fixturenames:
         return
-    router = request.getfixturevalue("respx_mock")
-    router.get(url__regex=r"https?://[^/]+/metrics$").mock(
-        return_value=httpx.Response(404, text="")
-    )
+    router: Any = request.getfixturevalue("respx_mock")
+    route = router.get(url__regex=r"https?://[^/]+/metrics$")
+    route.mock(return_value=httpx.Response(404, text=""))
+    router._bs_kv_route = route
+
+
+@pytest.fixture
+def remock_kv(respx_mock: respx.MockRouter) -> Callable[[httpx.Response], None]:
+    """Replace the autouse GET /metrics stub with a specific Prometheus body."""
+
+    def _set(response: httpx.Response) -> None:
+        route = object.__getattribute__(respx_mock, "_bs_kv_route")
+        route.mock(return_value=response)
+
+    return _set
 
 
 @pytest.fixture

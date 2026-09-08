@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -19,6 +20,23 @@ from benchmark_suite.workloads.chat_catalog import prompts_for_concurrency
 from benchmark_suite.workloads.tokens import content_tokens
 
 ENDPOINT = "http://127.0.0.1:8000"
+
+
+def _metric_n(metrics: dict[str, float | int | str], key: str) -> float:
+    value = metrics[key]
+    assert isinstance(value, (int, float))
+    return float(value)
+
+
+def _json_obj(path: Path) -> dict[str, Any]:
+    data: object = json.loads(path.read_text())
+    assert isinstance(data, dict)
+    return cast(dict[str, Any], data)
+
+
+def _json_list(obj: object) -> list[object]:
+    assert isinstance(obj, list)
+    return cast(list[object], obj)
 
 
 def _ok_response() -> httpx.Response:
@@ -299,15 +317,14 @@ def test_chat_records_prefill_and_timeseries(
     assert isinstance(cfg, SauceScorer)
     rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
     assert rec.status == ScoreStatus.SUCCESS
-    assert rec.metrics["ttft_mean_ms"] > 0
-    assert rec.metrics["input_tok_s"] > 0
-    assert rec.metrics["prefill_tok_s"] > 0
+    assert _metric_n(rec.metrics, "ttft_mean_ms") > 0
+    assert _metric_n(rec.metrics, "input_tok_s") > 0
+    assert _metric_n(rec.metrics, "prefill_tok_s") > 0
     assert "decode_tok_s" not in rec.metrics  # non-stream: no TTFT/decode split
     ts_path = tmp_path / "artifacts" / "chat_timeseries.json"
     assert ts_path.is_file()
-    payload = json.loads(ts_path.read_text())
-    events = payload["events"]
-    assert isinstance(events, list)
+    payload = _json_obj(ts_path)
+    events = _json_list(payload["events"])
     assert len(events) == 1
     event = cast(dict[str, Any], events[0])
     assert event["phase"] == "chat"
@@ -321,12 +338,12 @@ def test_chat_records_prefill_and_timeseries(
 
 
 def test_chat_records_kv_cache_from_metrics(
-    respx_mock: respx.MockRouter, tmp_path: Path
+    respx_mock: respx.MockRouter,
+    tmp_path: Path,
+    remock_kv: Callable[[httpx.Response], None],
 ) -> None:
     respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(return_value=_ok_response())
-    respx_mock.get(f"{ENDPOINT}/metrics").mock(
-        return_value=httpx.Response(200, text="vllm:gpu_cache_usage_perc 0.25\n")
-    )
+    remock_kv(httpx.Response(200, text="vllm:gpu_cache_usage_perc 0.25\n"))
     recipe = _recipe(
         stream=False,
         ladder=[1],
@@ -410,4 +427,4 @@ def test_chat_stream_records_decode_tok_s(
     assert "ttft_ms" in row
     assert "prefill_tok_s" in row
     if rec.metrics.get("decode_tok_s") is not None:
-        assert rec.metrics["decode_tok_s"] > 0
+        assert _metric_n(rec.metrics, "decode_tok_s") > 0

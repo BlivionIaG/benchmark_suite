@@ -1,8 +1,9 @@
 """Best-effort KV-cache usage from an OpenAI-compatible server's /metrics.
 
-Never raises into the scorer: 404, missing series, or a down endpoint → None.
-vLLM historically exports ``gpu_cache_usage_perc`` as a 0–1 fraction despite
-the name; values in (0, 1] are treated as fractions, values > 1 as percents.
+Never raises into the scorer: 404, missing series, or a down endpoint
+returns None. vLLM historically exports ``gpu_cache_usage_perc`` as a
+0-1 fraction despite the name; values in (0, 1] are treated as
+fractions, values > 1 as percents.
 """
 
 from __future__ import annotations
