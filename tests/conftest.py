@@ -1,11 +1,27 @@
 """Shared fixtures for benchmark_suite tests."""
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+
+# Rich/typer colorize dash-separated option names (`--lmx-bin` becomes
+# `-` + `-lmx` + `-bin` with SGR codes between). Help assertions must strip them.
+_ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI SGR sequences from CLI output."""
+    return _ANSI_SGR.sub("", text)
+
+
+@pytest.fixture
+def strip_ansi() -> Callable[[str], str]:
+    return _strip_ansi
 
 
 @pytest.fixture

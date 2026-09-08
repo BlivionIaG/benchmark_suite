@@ -583,14 +583,21 @@ def test_convert_logits_malformed_jsonl_exits_1(
 # ----- bs setup -----
 
 
-def test_cli_setup_help() -> None:
+def test_cli_setup_help(
+    monkeypatch: pytest.MonkeyPatch, strip_ansi: Callable[[str], str]
+) -> None:
+    # GitHub Actions uses a color-capable TERM; rich then splits `--lmx-bin`.
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "80")
     result = runner.invoke(cli.app, ["setup", "--help"])
     assert result.exit_code == 0
-    assert "--lmx-bin" in result.output
-    assert "--hardware-out" in result.output
-    assert "--no-login" in result.output
-    assert "--skip-auth" in result.output
-    assert "lmx" in result.output.lower()
+    help_text = strip_ansi(result.output)
+    assert "--lmx-bin" in help_text
+    assert "--hardware-out" in help_text
+    assert "--no-login" in help_text
+    assert "--skip-auth" in help_text
+    assert "lmx" in help_text.lower()
 
 
 def test_cli_setup_exits_zero_when_all_steps_pass(
