@@ -334,7 +334,7 @@ The CLI parses `lmx`'s stdout with a regex (`https?://[^\s]*?/speed-tests/([A-Za
 
 ## 11. Validation status (v1)
 
-- 250 tests passing (test_setup.py + test_cli.py bs setup/init --hardware added)
+- 281 tests passing (includes kind=sauce house-blend mixed workload)
 - ruff + basedpyright strict: clean
 - 5 recipes shipped (gfx1030 production + cross-platform perplexity + KLD + sauce house-blend), all with `hardware:` + `quantization:` blocks
 - CI runs on `ubuntu-latest` (CPU-only) via `.github/workflows/ci.yml`
