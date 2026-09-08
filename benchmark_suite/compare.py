@@ -15,7 +15,15 @@ from typing import Any
 from benchmark_suite.report import SUMMARY_CSV_COLUMNS
 
 HIGHER_BETTER_METRICS: frozenset[str] = frozenset(
-    {"output_tok_s", "total_tok_s", "judge_score", "successful", "agentic_accuracy"}
+    {
+        "output_tok_s",
+        "total_tok_s",
+        "judge_score",
+        "successful",
+        "agentic_accuracy",
+        "session_success_rate",
+        "session_turns",
+    }
 )
 LOWER_BETTER_METRICS: frozenset[str] = frozenset({"duration_s", "kl_divergence"})
 LOWER_BETTER_PREFIXES: tuple[str, ...] = ("ttft_", "tpot_", "perplexity_")

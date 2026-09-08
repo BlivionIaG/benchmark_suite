@@ -1,23 +1,27 @@
 """benchmark_suite.scoring — scorer implementations and the ScoreRecord contract."""
 from benchmark_suite.scoring.base import (
-    Scorer,
     ScoreRecord,
+    Scorer,
     ScorerRegistry,
     ScoreStatus,
 )
+from benchmark_suite.scoring.chat_load import ChatLoadScorerImpl
 from benchmark_suite.scoring.metadata_collector import (
     build_metadata,
     collect_hardware,
     collect_model_info,
     collect_software,
 )
+from benchmark_suite.scoring.session import SessionScorerImpl
 from benchmark_suite.scoring.throughput import ThroughputScorerImpl
 
 __all__ = [
+    "ChatLoadScorerImpl",
     "ScoreRecord",
     "ScoreStatus",
     "Scorer",
     "ScorerRegistry",
+    "SessionScorerImpl",
     "ThroughputScorerImpl",
     "collect_metadata",
 ]

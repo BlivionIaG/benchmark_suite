@@ -9,8 +9,10 @@ from pydantic import ValidationError
 
 from benchmark_suite.recipe import (
     CANONICAL_ENV,
+    ChatLoadScorer,
     KLDScorer,
     Recipe,
+    SessionScorer,
     ThroughputScorer,
     load_recipe,
 )
@@ -51,6 +53,8 @@ def test_load_full_recipe(tmp_path: Path) -> None:
                 {"kind": "perplexity", "tasks": ["wikitext"]},
                 {"kind": "llm_judge", "driver": "native"},
                 {"kind": "agentic", "harness": "inspect"},
+                {"kind": "chat_load"},
+                {"kind": "session"},
             ],
             "stop_conditions": {"max_duration_s": 3600.0},
         },
@@ -64,7 +68,7 @@ def test_load_full_recipe(tmp_path: Path) -> None:
     assert r.meta.tags == ["a", "b"]
     assert r.resources.tensor_parallel_size == 4
     assert r.resources.dtype == "float16"
-    assert len(r.bench.scoring) == 5
+    assert len(r.bench.scoring) == 7
     assert r.bench.stop_conditions.max_duration_s == 3600.0
     assert r.cell.render() == "dense_fardna2_rdna2_cg1_mtp2"
 
@@ -82,12 +86,42 @@ def test_scorer_discrimination() -> None:
                 "scoring": [
                     {"kind": "throughput", "tool": "llm-perf"},
                     {"kind": "kld", "source": "logits_dir"},
+                    {"kind": "chat_load"},
+                    {"kind": "session"},
                 ]
             },
         }
     )
     assert isinstance(r.bench.scoring[0], ThroughputScorer)
     assert isinstance(r.bench.scoring[1], KLDScorer)
+    assert isinstance(r.bench.scoring[2], ChatLoadScorer)
+    assert isinstance(r.bench.scoring[3], SessionScorer)
+    assert r.bench.scoring[2].ladder == [16, 8, 4, 2, 1]
+    assert [s.name for s in r.bench.scoring[2].suites] == ["short", "long"]
+    assert r.bench.scoring[2].suites[0].input_tokens == 1024
+    assert r.bench.scoring[2].suites[1].input_tokens == 16384
+    assert r.bench.scoring[3].max_context_tokens == 200_000
+    assert r.bench.scoring[3].n_sessions == 16
+
+
+def test_chat_load_rejects_unknown_ladder_rung() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "chat_load", "ladder": [32]}]},
+            }
+        )
+
+
+def test_session_n_sessions_bounds() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "session", "n_sessions": 0}]},
+            }
+        )
 
 
 def test_unknown_scorer_kind() -> None:

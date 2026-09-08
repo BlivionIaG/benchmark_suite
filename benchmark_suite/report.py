@@ -32,6 +32,9 @@ SUMMARY_CSV_COLUMNS: tuple[str, ...] = (
     "judge_score",
     "perplexity_wikitext",
     "agentic_accuracy",
+    "session_turns",
+    "session_success_rate",
+    "session_max_input_tokens",
     "started_at", "finished_at",
 )
 

@@ -199,8 +199,105 @@ class AgenticScorer(BaseModel):
     sandbox: str = "docker"
 
 
+_CHAT_LOAD_LADDER = frozenset({1, 2, 4, 8, 16})
+
+
+class ChatLoadSuite(BaseModel):
+    """One size class for ``kind: chat_load`` (e.g. 1k/512 or 16k/1k)."""
+
+    name: str = "short"
+    input_tokens: int = 1024
+    output_tokens: int = 512
+
+    @field_validator("name")
+    @classmethod
+    def _slug(cls, v: str) -> str:
+        if not SLUG_RE.match(v):
+            raise ValueError("chat_load suite name must be a slug [a-z0-9-_]")
+        return v
+
+    @field_validator("input_tokens", "output_tokens")
+    @classmethod
+    def _positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("must be >= 1")
+        return v
+
+
+def _default_chat_suites() -> list[ChatLoadSuite]:
+    return [
+        ChatLoadSuite(name="short", input_tokens=1024, output_tokens=512),
+        ChatLoadSuite(name="long", input_tokens=16384, output_tokens=1024),
+    ]
+
+
+class ChatLoadScorer(BaseModel):
+    """Concurrent diverse chat completions on the 16/8/4/2/1 prompt ladder."""
+
+    kind: Literal["chat_load"] = "chat_load"
+    ladder: list[int] = Field(default_factory=lambda: [16, 8, 4, 2, 1])
+    suites: list[ChatLoadSuite] = Field(default_factory=_default_chat_suites)
+    temperature: float = 0.7
+    stream: bool = True
+
+    @field_validator("ladder")
+    @classmethod
+    def _ladder(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError("chat_load ladder must not be empty")
+        extra = set(v) - _CHAT_LOAD_LADDER
+        if extra:
+            raise ValueError(
+                f"chat_load ladder values {sorted(extra)} are not in "
+                f"{sorted(_CHAT_LOAD_LADDER)}"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _unique_suites(self) -> ChatLoadScorer:
+        if not self.suites:
+            raise ValueError("chat_load suites must not be empty")
+        names = [s.name for s in self.suites]
+        if len(names) != len(set(names)):
+            raise ValueError("chat_load suite names must be unique")
+        return self
+
+
+class SessionScorer(BaseModel):
+    """Growing multi-turn coding-agent sessions (Pi-style system prompt)."""
+
+    kind: Literal["session"] = "session"
+    max_context_tokens: int = 200_000
+    n_sessions: int = 16
+    output_tokens: int = 1024
+    output_reserve_tokens: int = 2048
+    temperature: float = 0.7
+    stream: bool = True
+    max_turns: int | None = None
+
+    @field_validator("n_sessions")
+    @classmethod
+    def _n_sessions(cls, v: int) -> int:
+        if v < 1 or v > 16:
+            raise ValueError("n_sessions must be between 1 and 16")
+        return v
+
+    @field_validator("max_context_tokens", "output_tokens", "output_reserve_tokens")
+    @classmethod
+    def _positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("must be >= 1")
+        return v
+
+
 ScorerConfig = Annotated[
-    ThroughputScorer | PerplexityScorer | KLDScorer | LLMJudgeScorer | AgenticScorer,
+    ThroughputScorer
+    | PerplexityScorer
+    | KLDScorer
+    | LLMJudgeScorer
+    | AgenticScorer
+    | ChatLoadScorer
+    | SessionScorer,
     Field(discriminator="kind"),
 ]
 

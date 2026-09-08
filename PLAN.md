@@ -286,8 +286,37 @@ class AgenticScorer(BaseModel):
     sandbox: str = "docker"
 
 
+class ChatLoadSuite(BaseModel):
+    name: str = "short"
+    input_tokens: int = 1024
+    output_tokens: int = 512
+
+
+class ChatLoadScorer(BaseModel):
+    kind: Literal["chat_load"] = "chat_load"
+    ladder: list[int] = Field(default_factory=lambda: [16, 8, 4, 2, 1])  # catalog rungs only
+    suites: list[ChatLoadSuite] = Field(default_factory=lambda: [
+        ChatLoadSuite(name="short", input_tokens=1024, output_tokens=512),
+        ChatLoadSuite(name="long", input_tokens=16384, output_tokens=1024),
+    ])
+    temperature: float = 0.7
+    stream: bool = True
+
+
+class SessionScorer(BaseModel):
+    kind: Literal["session"] = "session"
+    max_context_tokens: int = 200_000
+    n_sessions: int = 16
+    output_tokens: int = 1024
+    output_reserve_tokens: int = 2048
+    temperature: float = 0.7
+    stream: bool = True
+    max_turns: Optional[int] = None          # cap turns; None → planner default (13)
+
+
 ScorerConfig = Annotated[
-    Union[ThroughputScorer, PerplexityScorer, KLDScorer, LLMJudgeScorer, AgenticScorer],
+    Union[ThroughputScorer, PerplexityScorer, KLDScorer, LLMJudgeScorer,
+          AgenticScorer, ChatLoadScorer, SessionScorer],
     Field(discriminator="kind"),
 ]
 
@@ -370,6 +399,16 @@ bench:
       tool: llm-perf
 cell: {family: dense, attn: triton, linear: rdna2, cg: 1, mtp: 0}
 ```
+
+### 2.1 OpenAI-compat mixed workload (`chat_load` + `session`)
+
+Shipped as `recipes/openai-compat.yaml`. Hits `/v1/chat/completions` (system + user messages). No extra binaries (httpx only).
+
+**`chat_load`**: 31 unique (system, task) pairs on a 16/8/4/2/1 concurrency ladder — 16 distinct prompts fire together, then 8 *new* ones at x8, then 4, 2, and 1. Same 31 tasks run at two sizes: **1024 in / 512 out** and **16384 in / 1024 out**. Input length is pinned with deterministic padding (`len(text)//4` chars-per-token, never truncating the real task). Subjects are diverse (medicine, law, orbital mechanics, poetry, STRIDE-level threat modeling, agronomy, …) and each has its own system persona. A suite that cannot fit in `resources.max_model_len` is skipped rather than failed.
+
+**`session`**: one Pi-style coding-agent system prompt, 16 distinct coding tasks, then 12 follow-ups per task (feature, failing test, bug, refactor, logging, perf, errors, docs, UX, persistence, extra module, release). Conversation history is real (assistant replies are kept). Input targets grow linearly toward `min(max_context_tokens, max_model_len) - output_reserve` so an 8k window does fewer turns than a 200k window. This is *not* inspect-ai (`kind: agentic`); it is an HTTP session simulation.
+
+Run either scorer alone by commenting the other block in the recipe.
 
 ---
 
