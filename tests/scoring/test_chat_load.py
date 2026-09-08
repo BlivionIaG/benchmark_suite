@@ -1,4 +1,4 @@
-"""Tests for benchmark_suite.scoring.chat_load — concurrent diverse chat waves."""
+"""Tests for the sauce chat phase — concurrent diverse chat waves."""
 
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ import respx
 from pydantic import ValidationError
 from respx.models import Call
 
-from benchmark_suite.recipe import ChatLoadScorer, Recipe
+from benchmark_suite.recipe import Recipe, SauceScorer
 from benchmark_suite.scoring.base import ScoreStatus
-from benchmark_suite.scoring.chat_load import ChatLoadScorerImpl
+from benchmark_suite.scoring.sauce import SauceScorerImpl
 
 ENDPOINT = "http://127.0.0.1:8000"
 
@@ -29,14 +29,22 @@ def _ok_response() -> httpx.Response:
     )
 
 
-def _recipe(**scoring: object) -> Recipe:
+def _recipe(**chat: object) -> Recipe:
     return Recipe.model_validate(
         {
-            "meta": {"name": "chat-load-test"},
+            "meta": {"name": "sauce-chat-test"},
             "backend": {"type": "external"},
             "endpoint": {"url": ENDPOINT, "model_name": "candidate"},
             "resources": {"max_model_len": 4096},
-            "bench": {"scoring": [{"kind": "chat_load", **scoring}]},
+            "bench": {
+                "scoring": [
+                    {
+                        "kind": "sauce",
+                        "chat": chat,
+                        "session": {"enabled": False},
+                    }
+                ]
+            },
         }
     )
 
@@ -58,6 +66,12 @@ def _first_message(body: dict[str, Any]) -> dict[str, Any]:
     return cast(dict[str, Any], first)
 
 
+def _chat_notes(rec_notes: dict[str, Any]) -> dict[str, Any]:
+    chat = rec_notes["chat"]
+    assert isinstance(chat, dict)
+    return cast(dict[str, Any], chat)
+
+
 def test_chat_load_c16_posts_sixteen_distinct_systems(
     respx_mock: respx.MockRouter, tmp_path: Path
 ) -> None:
@@ -70,8 +84,9 @@ def test_chat_load_c16_posts_sixteen_distinct_systems(
         suites=[{"name": "short", "input_tokens": 128, "output_tokens": 8}],
     )
     cfg = recipe.bench.scoring[0]
-    assert isinstance(cfg, ChatLoadScorer)
-    rec = ChatLoadScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.kind == "sauce"
     assert rec.status == ScoreStatus.SUCCESS
     assert route.call_count == 16
     systems: list[str] = []
@@ -103,14 +118,15 @@ def test_chat_load_skips_suite_that_exceeds_max_model_len(
         ],
     )
     cfg = recipe.bench.scoring[0]
-    assert isinstance(cfg, ChatLoadScorer)
-    rec = ChatLoadScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
     assert rec.status == ScoreStatus.SUCCESS
     assert route.call_count == 1
-    skipped = rec.notes["skipped_suites"]
+    chat_notes = _chat_notes(rec.notes)
+    skipped = chat_notes["skipped_suites"]
     assert isinstance(skipped, list)
     assert any("long" in str(item) for item in cast(list[object], skipped))
-    suites = rec.notes["suites"]
+    suites = chat_notes["suites"]
     assert isinstance(suites, list)
     suite_names: list[str] = []
     for row in cast(list[object], suites):
@@ -131,8 +147,8 @@ def test_chat_load_endpoint_failure_is_recorded(
         suites=[{"name": "short", "input_tokens": 64, "output_tokens": 8}],
     )
     cfg = recipe.bench.scoring[0]
-    assert isinstance(cfg, ChatLoadScorer)
-    rec = ChatLoadScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
     assert rec.status == ScoreStatus.FAILURE
     assert rec.metrics.get("failed") == 1 or rec.error
 

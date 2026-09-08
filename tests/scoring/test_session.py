@@ -1,4 +1,4 @@
-"""Tests for benchmark_suite.scoring.session — growing coding-agent turns."""
+"""Tests for the sauce session phase — growing coding-agent turns."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import httpx
 import respx
 from respx.models import Call
 
-from benchmark_suite.recipe import Recipe, SessionScorer
+from benchmark_suite.recipe import Recipe, SauceScorer
 from benchmark_suite.scoring.base import ScoreStatus
-from benchmark_suite.scoring.session import SessionScorerImpl
+from benchmark_suite.scoring.sauce import SauceScorerImpl
 from benchmark_suite.workloads.session_catalog import plan_turn_input_targets
 
 ENDPOINT = "http://127.0.0.1:8000"
@@ -28,14 +28,22 @@ def _ok_response() -> httpx.Response:
     )
 
 
-def _recipe(**scoring: object) -> Recipe:
+def _recipe(**session: object) -> Recipe:
     return Recipe.model_validate(
         {
-            "meta": {"name": "session-test"},
+            "meta": {"name": "sauce-session-test"},
             "backend": {"type": "external"},
             "endpoint": {"url": ENDPOINT, "model_name": "candidate"},
             "resources": {"max_model_len": 8192},
-            "bench": {"scoring": [{"kind": "session", **scoring}]},
+            "bench": {
+                "scoring": [
+                    {
+                        "kind": "sauce",
+                        "chat": {"enabled": False},
+                        "session": session,
+                    }
+                ]
+            },
         }
     )
 
@@ -64,8 +72,9 @@ def test_session_messages_grow_and_keep_system_prompt(
         max_context_tokens=200000,
     )
     cfg = recipe.bench.scoring[0]
-    assert isinstance(cfg, SessionScorer)
-    rec = SessionScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.kind == "sauce"
     assert rec.status == ScoreStatus.SUCCESS
     assert route.call_count == 3
     sizes: list[int] = []
@@ -119,7 +128,7 @@ def test_session_http_failure_marks_session_failed(
         output_reserve_tokens=256,
     )
     cfg = recipe.bench.scoring[0]
-    assert isinstance(cfg, SessionScorer)
-    rec = SessionScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
     assert rec.status == ScoreStatus.FAILURE
     assert rec.metrics.get("failed") == 1 or rec.error

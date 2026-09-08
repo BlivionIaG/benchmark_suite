@@ -11,11 +11,10 @@ from pathlib import Path
 import pytest
 
 from benchmark_suite.recipe import (
-    ChatLoadScorer,
     KLDScorer,
     PerplexityScorer,
     Recipe,
-    SessionScorer,
+    SauceScorer,
     ThroughputScorer,
     load_recipe,
 )
@@ -91,19 +90,19 @@ def test_kld_recipe_specifics() -> None:
     assert kld[0].vocab_check is True
 
 
-def test_openai_compat_recipe_specifics() -> None:
-    r = _recipe("openai-compat")
+def test_sauce_recipe_specifics() -> None:
+    r = _recipe("sauce")
     assert r.backend.type == "external"
     assert r.resources.max_model_len == 200000
     kinds = [s.kind for s in r.bench.scoring]
-    assert kinds == ["chat_load", "session"]
-    chat = next(s for s in r.bench.scoring if isinstance(s, ChatLoadScorer))
-    assert chat.ladder == [16, 8, 4, 2, 1]
-    assert [(s.name, s.input_tokens, s.output_tokens) for s in chat.suites] == [
+    assert kinds == ["sauce"]
+    sauce = next(s for s in r.bench.scoring if isinstance(s, SauceScorer))
+    assert sauce.chat.ladder == [16, 8, 4, 2, 1]
+    assert [(s.name, s.input_tokens, s.output_tokens) for s in sauce.chat.suites] == [
         ("short", 1024, 512),
         ("long", 16384, 1024),
     ]
-    sess = next(s for s in r.bench.scoring if isinstance(s, SessionScorer))
-    assert sess.n_sessions == 16
-    assert sess.max_context_tokens == 200000
+    assert sauce.session.n_sessions == 16
+    assert sauce.session.max_context_tokens == 200000
+    assert r.quantization == "FP16"
 

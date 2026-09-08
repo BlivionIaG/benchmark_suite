@@ -1,4 +1,4 @@
-"""session scorer — growing multi-turn coding-agent conversations."""
+"""sauce session phase — growing multi-turn coding-agent conversations."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from typing import Any
 
 import httpx
 
-from benchmark_suite.recipe import Recipe, SessionScorer
-from benchmark_suite.scoring.base import Scorer, ScoreRecord, ScoreStatus, scorer
+from benchmark_suite.recipe import Recipe, SauceSessionSection
+from benchmark_suite.scoring.base import Scorer, ScoreRecord, ScoreStatus
 from benchmark_suite.scoring.chat_http import (
     auth_headers,
     chat_completions_url,
@@ -28,13 +28,12 @@ from benchmark_suite.workloads.session_catalog import (
 from benchmark_suite.workloads.tokens import content_tokens, pad_last_user_to_total
 
 
-@scorer
 class SessionScorerImpl(Scorer):
     """Pi-style coding sessions whose context climbs toward ``max_context_tokens``."""
 
     kind = "session"
 
-    def __init__(self, config: SessionScorer) -> None:
+    def __init__(self, config: SauceSessionSection) -> None:
         self.config = config
 
     def score(

@@ -1,4 +1,4 @@
-"""chat_load scorer — concurrent diverse chat completions on a 16/8/4/2/1 ladder."""
+"""sauce chat phase — concurrent diverse chat completions on a 16/8/4/2/1 ladder."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from typing import Any, cast
 
 import httpx
 
-from benchmark_suite.recipe import ChatLoadScorer, ChatLoadSuite, Recipe
-from benchmark_suite.scoring.base import Scorer, ScoreRecord, ScoreStatus, scorer
+from benchmark_suite.recipe import ChatLoadSuite, Recipe, SauceChatSection
+from benchmark_suite.scoring.base import Scorer, ScoreRecord, ScoreStatus
 from benchmark_suite.scoring.chat_http import (
     ChatCompletionResult,
     auth_headers,
@@ -68,13 +68,12 @@ def _wave_metrics(
     }
 
 
-@scorer
 class ChatLoadScorerImpl(Scorer):
     """Concurrent chat/completions using the shipped diverse prompt catalog."""
 
     kind = "chat_load"
 
-    def __init__(self, config: ChatLoadScorer) -> None:
+    def __init__(self, config: SauceChatSection) -> None:
         self.config = config
 
     def score(

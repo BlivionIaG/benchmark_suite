@@ -6,7 +6,7 @@ This file is the **first thing an agent reads**. It's structured so you can answ
 
 `bs` — a CLI that runs reproducible benchmarks against any OpenAI-compatible LLM endpoint (vLLM, llama.cpp server, TGI, OpenAI API). Recipes are YAML; scorers are pluggable; results land in `results/<name>_<ts>/<cell_id>/`.
 
-Seven scorers ship (see `benchmark_suite/scoring/`):
+Six scorers ship (see `benchmark_suite/scoring/`):
 
 | `kind` | What it measures | Tool |
 |---|---|---|
@@ -15,8 +15,7 @@ Seven scorers ship (see `benchmark_suite/scoring/`):
 | `kld` | per-token KL divergence vs reference distribution | custom top-k KL on safetensors cache, or `llm-perf kl-divergence` |
 | `llm_judge` | 0–10 quality score from a judge LLM | native httpx (default, no Node) or `promptfoo` |
 | `agentic` | task pass rate | `inspect-ai` (primary) / `terminal-bench` (experimental) |
-| `chat_load` | concurrent diverse chat (16/8/4/2/1 ladder, 1k/512 + 16k/1k) | native httpx `/v1/chat/completions` |
-| `session` | growing Pi-style coding sessions toward 200k context | native httpx multi-turn chat |
+| `sauce` | house-blend mixed workload (chat ladder + growing coding sessions) | native httpx `/v1/chat/completions` — original to this suite |
 
 `PLAN.md` is the **source of truth for design decisions**. Read it before making schema or architecture changes.
 
@@ -75,8 +74,9 @@ benchmark_suite/
 │   ├── kl_divergence.py    # safetensors top-k KL (vocab-checked, vocab-mismatch refuses)
 │   ├── llm_judge.py        # native httpx rubric (or promptfoo subprocess)
 │   ├── agentic.py          # inspect-ai primary, terminal-bench best-effort
-│   ├── chat_load.py        # concurrent diverse chat (16/8/4/2/1 ladder)
-│   └── session.py          # Pi-style growing coding sessions
+│   ├── sauce.py            # house-blend mixed workload (chat ladder + sessions)
+│   ├── chat_load.py        # sauce chat phase helper
+│   └── session.py          # sauce session phase helper
 ├── workloads/
 │   ├── tokens.py          # 4-chars-per-token estimate + deterministic padding
 │   ├── chat_catalog.py    # 31 unique (system, task) pairs
@@ -97,7 +97,7 @@ tests/
 ├── test_cli.py, test_compare.py, test_report.py    # integration tests
 ├── runner/                 # endpoint + serve + llm_perf + vllm_bench tests
 ├── scoring/                # per-scorer tests
-├── workloads/             # chat_load / session catalog + token padding tests
+├── workloads/             # sauce chat/session catalogs + token padding tests
 └── fixtures/               # canned outputs (e.g., vllm_bench stdout sample)
 ```
 
@@ -336,7 +336,7 @@ The CLI parses `lmx`'s stdout with a regex (`https?://[^\s]*?/speed-tests/([A-Za
 
 - 250 tests passing (test_setup.py + test_cli.py bs setup/init --hardware added)
 - ruff + basedpyright strict: clean
-- 5 recipes shipped (gfx1030 production + cross-platform perplexity + KLD + openai-compat), all with `hardware:` + `quantization:` blocks
+- 5 recipes shipped (gfx1030 production + cross-platform perplexity + KLD + sauce house-blend), all with `hardware:` + `quantization:` blocks
 - CI runs on `ubuntu-latest` (CPU-only) via `.github/workflows/ci.yml`
 - `bs submit` tested with a fake-lmx bash script that records argv and prints synthetic output — no `lmx` binary required in CI
 - `bs setup` tested with monkeypatched `shutil.which` + fake-lmx; the GPU-detection torch fallback uses a `_Torch` mock

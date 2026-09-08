@@ -29,12 +29,11 @@ from benchmark_suite.recipe import (
     SLUG_RE,
     AgenticScorer,
     BenchSection,
-    ChatLoadScorer,
     KLDScorer,
     LLMJudgeScorer,
     PerplexityScorer,
     Recipe,
-    SessionScorer,
+    SauceScorer,
     ThroughputScorer,
     load_recipe,
 )
@@ -45,11 +44,10 @@ from benchmark_suite.runner.serve import managed_server
 # Importing the scorer modules registers them in ScorerRegistry (side effect).
 from benchmark_suite.scoring import (  # noqa: F401
     agentic,  # pyright: ignore[reportUnusedImport]
-    chat_load,  # pyright: ignore[reportUnusedImport]
     kl_divergence,  # pyright: ignore[reportUnusedImport]
     llm_judge,  # pyright: ignore[reportUnusedImport]
     perplexity,  # pyright: ignore[reportUnusedImport]
-    session,  # pyright: ignore[reportUnusedImport]
+    sauce,  # pyright: ignore[reportUnusedImport]
     throughput,  # pyright: ignore[reportUnusedImport]
 )
 from benchmark_suite.scoring.base import ScoreRecord, ScorerRegistry, ScoreStatus
@@ -213,9 +211,7 @@ def _scorer_requirements(bench: BenchSection) -> dict[str, list[str]]:
                 required = ["inspect"]
             case AgenticScorer():
                 required = ["docker"]
-            case ChatLoadScorer():
-                required = []
-            case SessionScorer():
+            case SauceScorer():
                 required = []
             case _:
                 assert_never(cfg)

@@ -50,14 +50,23 @@ benchmark_suite/
 │   │   ├── perplexity.py          # lm-eval subprocess, model=local-completions, wikitext ppl
 │   │   ├── kl_divergence.py       # dual source: llm-perf native | logits_dir (memmap + top-k KL)
 │   │   ├── llm_judge.py           # driver=native (httpx rubric judge) | promptfoo (npx/PyPI wrapper)
-│   │   └── agentic.py             # harness=inspect (inspect-ai subprocess) | terminal-bench (best-effort)
+│   │   ├── agentic.py             # harness=inspect (inspect-ai subprocess) | terminal-bench (best-effort)
+│   │   ├── sauce.py              # house-blend mixed workload (chat ladder + sessions)
+│   │   ├── chat_load.py          # sauce chat phase helper (not a public kind)
+│   │   ├── session.py            # sauce session phase helper
+│   │   └── chat_http.py          # shared /v1/chat/completions client
+│   ├── workloads/
+│   │   ├── tokens.py             # 4-chars-per-token estimate + deterministic padding
+│   │   ├── chat_catalog.py      # 31 unique (system, task) pairs
+│   │   └── session_catalog.py   # coding-agent system prompt + 16 sessions × 12 follow-ups
 │   ├── report.py                  # summary.csv (legacy columns), summary.json, README.md (parent style)
 │   └── compare.py                 # diff two result dirs → md + csv delta tables
 ├── recipes/
 │   ├── qwen36-27b-gptq-tp4.yaml         # dense W4A16, V2+FPP, canonical gfx1030 env
 │   ├── qwen36-35b-a3b-fp16-tp4.yaml     # MoE FP16 reference
 │   ├── perplexity-compare.yaml          # wikitext ppl across two endpoints
-│   └── kld-vs-fp16-reference.yaml       # logits_dir KLD vs models/kl_logits (quant drift)
+│   ├── kld-vs-fp16-reference.yaml       # logits_dir KLD vs models/kl_logits (quant drift)
+│   └── sauce.yaml                       # house-blend mixed workload (kind: sauce)
 ├── tests/
 │   ├── conftest.py                # fixtures: respx mock OpenAI server, fake llm-perf binary, tmp recipe
 │   ├── test_recipe.py             # schema validation, union discrimination, env merge, cell render
@@ -71,7 +80,10 @@ benchmark_suite/
 │       ├── test_perplexity.py     # subprocess argv + lm-eval JSON fixture parse
 │       ├── test_kl_divergence.py  # tiny synthetic logits, hand-computed KL equality
 │       ├── test_llm_judge.py      # native rubric flow via respx; promptfoo argv build
-│       └── test_agentic.py        # inspect argv build; missing-binary errors
+│       ├── test_agentic.py        # inspect argv build; missing-binary errors
+│       ├── test_sauce.py         # kind=sauce merge + chat-then-session
+│       ├── test_chat_load.py     # sauce chat phase (ladder / skip / http)
+│       └── test_session.py       # sauce session phase (growth / http)
 └── results/                       # gitignored
 ```
 
@@ -292,8 +304,8 @@ class ChatLoadSuite(BaseModel):
     output_tokens: int = 512
 
 
-class ChatLoadScorer(BaseModel):
-    kind: Literal["chat_load"] = "chat_load"
+class SauceChatSection(BaseModel):
+    enabled: bool = True
     ladder: list[int] = Field(default_factory=lambda: [16, 8, 4, 2, 1])  # catalog rungs only
     suites: list[ChatLoadSuite] = Field(default_factory=lambda: [
         ChatLoadSuite(name="short", input_tokens=1024, output_tokens=512),
@@ -303,8 +315,8 @@ class ChatLoadScorer(BaseModel):
     stream: bool = True
 
 
-class SessionScorer(BaseModel):
-    kind: Literal["session"] = "session"
+class SauceSessionSection(BaseModel):
+    enabled: bool = True
     max_context_tokens: int = 200_000
     n_sessions: int = 16
     output_tokens: int = 1024
@@ -314,9 +326,16 @@ class SessionScorer(BaseModel):
     max_turns: Optional[int] = None          # cap turns; None → planner default (13)
 
 
+class SauceScorer(BaseModel):
+    kind: Literal["sauce"] = "sauce"
+    chat: SauceChatSection = Field(default_factory=SauceChatSection)
+    session: SauceSessionSection = Field(default_factory=SauceSessionSection)
+    # validator: at least one of chat.enabled / session.enabled
+
+
 ScorerConfig = Annotated[
     Union[ThroughputScorer, PerplexityScorer, KLDScorer, LLMJudgeScorer,
-          AgenticScorer, ChatLoadScorer, SessionScorer],
+          AgenticScorer, SauceScorer],
     Field(discriminator="kind"),
 ]
 
@@ -400,15 +419,15 @@ bench:
 cell: {family: dense, attn: triton, linear: rdna2, cg: 1, mtp: 0}
 ```
 
-### 2.1 OpenAI-compat mixed workload (`chat_load` + `session`)
+### 2.1 House-blend mixed workload (`sauce`)
 
-Shipped as `recipes/openai-compat.yaml`. Hits `/v1/chat/completions` (system + user messages). No extra binaries (httpx only).
+Shipped as `recipes/sauce.yaml`. Original to this suite — not a wrapper around llm-perf, inspect-ai, or promptfoo. Hits `/v1/chat/completions` (system + user messages). No extra binaries (httpx only). One discriminated kind with two phases; disable a phase with `enabled: false`.
 
-**`chat_load`**: 31 unique (system, task) pairs on a 16/8/4/2/1 concurrency ladder — 16 distinct prompts fire together, then 8 *new* ones at x8, then 4, 2, and 1. Same 31 tasks run at two sizes: **1024 in / 512 out** and **16384 in / 1024 out**. Input length is pinned with deterministic padding (`len(text)//4` chars-per-token, never truncating the real task). Subjects are diverse (medicine, law, orbital mechanics, poetry, STRIDE-level threat modeling, agronomy, …) and each has its own system persona. A suite that cannot fit in `resources.max_model_len` is skipped rather than failed.
+**chat phase**: 31 unique (system, task) pairs on a 16/8/4/2/1 concurrency ladder — 16 distinct prompts fire together, then 8 *new* ones at x8, then 4, 2, and 1. Same 31 tasks run at two sizes: **1024 in / 512 out** and **16384 in / 1024 out**. Input length is pinned with deterministic padding (`len(text)//4` chars-per-token, never truncating the real task). Subjects are diverse (medicine, law, orbital mechanics, poetry, STRIDE-level threat modeling, agronomy, …) and each has its own system persona. A suite that cannot fit in `resources.max_model_len` is skipped rather than failed.
 
-**`session`**: one Pi-style coding-agent system prompt, 16 distinct coding tasks, then 12 follow-ups per task (feature, failing test, bug, refactor, logging, perf, errors, docs, UX, persistence, extra module, release). Conversation history is real (assistant replies are kept). Input targets grow linearly toward `min(max_context_tokens, max_model_len) - output_reserve` so an 8k window does fewer turns than a 200k window. This is *not* inspect-ai (`kind: agentic`); it is an HTTP session simulation.
+**session phase**: one Pi-style coding-agent system prompt, 16 distinct coding tasks, then 12 follow-ups per task (feature, failing test, bug, refactor, logging, perf, errors, docs, UX, persistence, extra module, release). Conversation history is real (assistant replies are kept). Input targets grow linearly toward `min(max_context_tokens, max_model_len) - output_reserve` so an 8k window does fewer turns than a 200k window. This is *not* inspect-ai (`kind: agentic`); it is an HTTP session simulation.
 
-Run either scorer alone by commenting the other block in the recipe.
+Chat metrics (`output_tok_s`, TTFT, …) come from the chat phase; `session_*` columns come from the session phase; `duration_s` / `successful` / `failed` are summed. Overall SUCCESS if any enabled phase succeeded.
 
 ---
 

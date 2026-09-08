@@ -1,4 +1,4 @@
-"""Invariants for the shipped chat_load and session prompt catalogs."""
+"""Invariants for the shipped sauce chat and session prompt catalogs."""
 
 from __future__ import annotations
 

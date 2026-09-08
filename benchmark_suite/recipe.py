@@ -199,11 +199,11 @@ class AgenticScorer(BaseModel):
     sandbox: str = "docker"
 
 
-_CHAT_LOAD_LADDER = frozenset({1, 2, 4, 8, 16})
+_SAUCE_LADDER = frozenset({1, 2, 4, 8, 16})
 
 
 class ChatLoadSuite(BaseModel):
-    """One size class for ``kind: chat_load`` (e.g. 1k/512 or 16k/1k)."""
+    """One size class for the sauce chat ladder (e.g. 1k/512 or 16k/1k)."""
 
     name: str = "short"
     input_tokens: int = 1024
@@ -213,7 +213,7 @@ class ChatLoadSuite(BaseModel):
     @classmethod
     def _slug(cls, v: str) -> str:
         if not SLUG_RE.match(v):
-            raise ValueError("chat_load suite name must be a slug [a-z0-9-_]")
+            raise ValueError("sauce chat suite name must be a slug [a-z0-9-_]")
         return v
 
     @field_validator("input_tokens", "output_tokens")
@@ -231,10 +231,10 @@ def _default_chat_suites() -> list[ChatLoadSuite]:
     ]
 
 
-class ChatLoadScorer(BaseModel):
+class SauceChatSection(BaseModel):
     """Concurrent diverse chat completions on the 16/8/4/2/1 prompt ladder."""
 
-    kind: Literal["chat_load"] = "chat_load"
+    enabled: bool = True
     ladder: list[int] = Field(default_factory=lambda: [16, 8, 4, 2, 1])
     suites: list[ChatLoadSuite] = Field(default_factory=_default_chat_suites)
     temperature: float = 0.7
@@ -244,29 +244,29 @@ class ChatLoadScorer(BaseModel):
     @classmethod
     def _ladder(cls, v: list[int]) -> list[int]:
         if not v:
-            raise ValueError("chat_load ladder must not be empty")
-        extra = set(v) - _CHAT_LOAD_LADDER
+            raise ValueError("sauce chat ladder must not be empty")
+        extra = set(v) - _SAUCE_LADDER
         if extra:
             raise ValueError(
-                f"chat_load ladder values {sorted(extra)} are not in "
-                f"{sorted(_CHAT_LOAD_LADDER)}"
+                f"sauce chat ladder values {sorted(extra)} are not in "
+                f"{sorted(_SAUCE_LADDER)}"
             )
         return v
 
     @model_validator(mode="after")
-    def _unique_suites(self) -> ChatLoadScorer:
+    def _unique_suites(self) -> SauceChatSection:
         if not self.suites:
-            raise ValueError("chat_load suites must not be empty")
+            raise ValueError("sauce chat suites must not be empty")
         names = [s.name for s in self.suites]
         if len(names) != len(set(names)):
-            raise ValueError("chat_load suite names must be unique")
+            raise ValueError("sauce chat suite names must be unique")
         return self
 
 
-class SessionScorer(BaseModel):
+class SauceSessionSection(BaseModel):
     """Growing multi-turn coding-agent sessions (Pi-style system prompt)."""
 
-    kind: Literal["session"] = "session"
+    enabled: bool = True
     max_context_tokens: int = 200_000
     n_sessions: int = 16
     output_tokens: int = 1024
@@ -290,14 +290,31 @@ class SessionScorer(BaseModel):
         return v
 
 
+class SauceScorer(BaseModel):
+    """House-blend mixed workload — original to this suite, not a tool wrapper.
+
+    Two phases, one kind: a diverse concurrent chat ladder, then growing
+    coding-agent sessions. Disable a phase with ``enabled: false``.
+    """
+
+    kind: Literal["sauce"] = "sauce"
+    chat: SauceChatSection = Field(default_factory=SauceChatSection)
+    session: SauceSessionSection = Field(default_factory=SauceSessionSection)
+
+    @model_validator(mode="after")
+    def _at_least_one_phase(self) -> SauceScorer:
+        if not self.chat.enabled and not self.session.enabled:
+            raise ValueError("sauce requires chat.enabled and/or session.enabled")
+        return self
+
+
 ScorerConfig = Annotated[
     ThroughputScorer
     | PerplexityScorer
     | KLDScorer
     | LLMJudgeScorer
     | AgenticScorer
-    | ChatLoadScorer
-    | SessionScorer,
+    | SauceScorer,
     Field(discriminator="kind"),
 ]
 
