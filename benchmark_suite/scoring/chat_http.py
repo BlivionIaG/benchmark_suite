@@ -50,39 +50,45 @@ def _usage_ints(usage: object) -> tuple[int, int]:
     return p, c
 
 
-def _message_text(body: dict[str, Any]) -> str:
+def _choice_dict(body: dict[str, Any]) -> dict[str, Any] | None:
     choices = body.get("choices")
     if not isinstance(choices, list) or not choices:
-        return ""
-    first = choices[0]
+        return None
+    first: object = cast(list[object], choices)[0]
     if not isinstance(first, dict):
+        return None
+    return cast(dict[str, Any], first)
+
+
+def _str_field(obj: dict[str, Any], key: str) -> str:
+    value = obj.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _message_text(body: dict[str, Any]) -> str:
+    first = _choice_dict(body)
+    if first is None:
         return ""
     message = first.get("message")
     if isinstance(message, dict):
-        content = message.get("content")
-        if isinstance(content, str):
+        content = _str_field(cast(dict[str, Any], message), "content")
+        if content:
             return content
-    text = first.get("text")
-    return text if isinstance(text, str) else ""
+    return _str_field(first, "text")
 
 
 def _delta_content(event: dict[str, Any]) -> str:
-    choices = event.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return ""
-    first = choices[0]
-    if not isinstance(first, dict):
+    first = _choice_dict(event)
+    if first is None:
         return ""
     delta = first.get("delta")
     if isinstance(delta, dict):
-        content = delta.get("content")
-        if isinstance(content, str):
+        content = _str_field(cast(dict[str, Any], delta), "content")
+        if content:
             return content
     message = first.get("message")
     if isinstance(message, dict):
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
+        return _str_field(cast(dict[str, Any], message), "content")
     return ""
 
 

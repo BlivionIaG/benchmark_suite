@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from itertools import pairwise
 
 from benchmark_suite.workloads.chat_catalog import (
     CHAT_LADDER,
@@ -68,8 +69,8 @@ def test_plan_turn_input_targets_grows_and_clips_for_small_context() -> None:
     assert large[-1] == 197952
     assert small[-1] == 6000
     assert len(large) > len(small)
-    assert all(a < b for a, b in zip(large, large[1:], strict=False))
-    assert all(a < b for a, b in zip(small, small[1:], strict=False))
+    assert all(a < b for a, b in pairwise(large))
+    assert all(a < b for a, b in pairwise(small))
     assert large[0] >= 2048 or large[0] == large[-1]
 
 

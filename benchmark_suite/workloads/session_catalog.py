@@ -40,7 +40,7 @@ Session memory:
   ones when paths collide.
 
 Output shape for each turn:
-1. Short plan (3–8 bullets).
+1. Short plan (3-8 bullets).
 2. Patches / files.
 3. Commands to run.
 4. Risks or tests still missing.
@@ -48,6 +48,10 @@ Output shape for each turn:
 You are not a general chatbot. Stay inside the repository task. If the user
 asks for something outside the attached project, say so and offer the
 smallest related change that still helps.
+
+When the attached workspace is long, do not summarize the whole tree. Work
+from the files the latest user message highlights. Quote paths when you
+change them so a later turn can attach a patched snapshot.
 """
 
 
@@ -424,8 +428,6 @@ def plan_turn_input_targets(*, budget: int, max_turns: int = 13) -> list[int]:
 
 def workspace_blob(session_id: str, turn: int, extra_tokens: int) -> str:
     """Fake attached source files used to grow agentic context."""
-    from benchmark_suite.workloads.tokens import pad_to_tokens
-
     header = (
         f"## Attached workspace (turn {turn}, session {session_id})\n\n"
         f"Paths below are the current tree. Later turns replace files with "

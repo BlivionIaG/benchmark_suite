@@ -9,7 +9,7 @@ import statistics
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -132,9 +132,9 @@ class ChatLoadScorerImpl(Scorer):
             for row in per_suite:
                 waves_obj = row.get("waves", [])
                 if isinstance(waves_obj, list):
-                    for wave in waves_obj:
+                    for wave in cast(list[object], waves_obj):
                         if isinstance(wave, dict):
-                            all_waves.append(wave)
+                            all_waves.append(cast(dict[str, Any], wave))
             successful = sum(int(w["successful"]) for w in all_waves)
             failed = sum(int(w["failed"]) for w in all_waves)
             tpot_vals = [

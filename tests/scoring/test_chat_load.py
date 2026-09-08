@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
+import respx
 from pydantic import ValidationError
+from respx.models import Call
 
 from benchmark_suite.recipe import ChatLoadScorer, Recipe
 from benchmark_suite.scoring.base import ScoreStatus
@@ -38,6 +41,23 @@ def _recipe(**scoring: object) -> Recipe:
     )
 
 
+def _bodies(route: respx.Route) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for call in cast(list[Call], list(route.calls)):
+        data: object = json.loads(call.request.content.decode())
+        assert isinstance(data, dict)
+        out.append(cast(dict[str, Any], data))
+    return out
+
+
+def _first_message(body: dict[str, Any]) -> dict[str, Any]:
+    messages = body["messages"]
+    assert isinstance(messages, list)
+    first: object = cast(list[object], messages)[0]
+    assert isinstance(first, dict)
+    return cast(dict[str, Any], first)
+
+
 def test_chat_load_c16_posts_sixteen_distinct_systems(
     respx_mock: respx.MockRouter, tmp_path: Path
 ) -> None:
@@ -55,13 +75,13 @@ def test_chat_load_c16_posts_sixteen_distinct_systems(
     assert rec.status == ScoreStatus.SUCCESS
     assert route.call_count == 16
     systems: list[str] = []
-    for call in route.calls:
-        body = json.loads(call.request.content.decode())
+    for body in _bodies(route):
         assert body["model"] == "candidate"
         assert body["max_tokens"] == 8
         assert body["stream"] is False
-        assert body["messages"][0]["role"] == "system"
-        systems.append(body["messages"][0]["content"])
+        first = _first_message(body)
+        assert first["role"] == "system"
+        systems.append(str(first["content"]))
     assert len(set(systems)) == 16
     assert rec.metrics["successful"] == 16
     assert rec.metrics["concurrency"] == 16
@@ -89,8 +109,13 @@ def test_chat_load_skips_suite_that_exceeds_max_model_len(
     assert route.call_count == 1
     skipped = rec.notes["skipped_suites"]
     assert isinstance(skipped, list)
-    assert any("long" in str(item) for item in skipped)
-    suite_names = [row["name"] for row in rec.notes["suites"]]
+    assert any("long" in str(item) for item in cast(list[object], skipped))
+    suites = rec.notes["suites"]
+    assert isinstance(suites, list)
+    suite_names: list[str] = []
+    for row in cast(list[object], suites):
+        assert isinstance(row, dict)
+        suite_names.append(str(cast(dict[str, Any], row)["name"]))
     assert suite_names == ["short"]
 
 

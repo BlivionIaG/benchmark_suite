@@ -211,7 +211,7 @@ CHAT_PROMPTS: tuple[ChatPromptSpec, ...] = (
         "surgeon case (harvest one healthy patient to save five). Why do "
         "many people split their intuitions, and what does that suggest "
         "about whether 'numbers' or 'using someone as a means' is doing "
-        "the work? 400–600 words.",
+        "the work? 400-600 words.",
     ),
     _s(
         "payments-stride",

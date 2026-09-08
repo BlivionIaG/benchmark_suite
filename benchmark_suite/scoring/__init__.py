@@ -1,7 +1,7 @@
 """benchmark_suite.scoring — scorer implementations and the ScoreRecord contract."""
 from benchmark_suite.scoring.base import (
-    ScoreRecord,
     Scorer,
+    ScoreRecord,
     ScorerRegistry,
     ScoreStatus,
 )

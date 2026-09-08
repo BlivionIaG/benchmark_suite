@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import respx
+from respx.models import Call
 
 from benchmark_suite.recipe import Recipe, SessionScorer
 from benchmark_suite.scoring.base import ScoreStatus
@@ -38,6 +40,15 @@ def _recipe(**scoring: object) -> Recipe:
     )
 
 
+def _bodies(route: respx.Route) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for call in cast(list[Call], list(route.calls)):
+        data: object = json.loads(call.request.content.decode())
+        assert isinstance(data, dict)
+        out.append(cast(dict[str, Any], data))
+    return out
+
+
 def test_session_messages_grow_and_keep_system_prompt(
     respx_mock: respx.MockRouter, tmp_path: Path
 ) -> None:
@@ -58,11 +69,20 @@ def test_session_messages_grow_and_keep_system_prompt(
     assert rec.status == ScoreStatus.SUCCESS
     assert route.call_count == 3
     sizes: list[int] = []
-    for call in route.calls:
-        body = json.loads(call.request.content.decode())
-        assert body["messages"][0]["role"] == "system"
-        assert "coding agent" in body["messages"][0]["content"].lower()
-        sizes.append(sum(len(m["content"]) for m in body["messages"]))
+    for body in _bodies(route):
+        messages = body["messages"]
+        assert isinstance(messages, list)
+        typed = cast(list[object], messages)
+        first = typed[0]
+        assert isinstance(first, dict)
+        first_d = cast(dict[str, Any], first)
+        assert first_d["role"] == "system"
+        assert "coding agent" in str(first_d["content"]).lower()
+        total = 0
+        for message in typed:
+            assert isinstance(message, dict)
+            total += len(str(cast(dict[str, Any], message)["content"]))
+        sizes.append(total)
         assert body["max_tokens"] == 16
     assert sizes[0] < sizes[1] < sizes[2]
     assert rec.metrics["session_turns"] == 3
