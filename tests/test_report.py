@@ -78,6 +78,17 @@ class TestWriteSummaryCsv:
             "session_turns",
             "session_success_rate",
             "session_max_input_tokens",
+            "input_tok_s",
+            "prefill_tok_s",
+            "decode_tok_s",
+            "cached_tokens",
+            "kv_cache_perc",
+            "session_ttft_mean_ms",
+            "session_tpot_mean_ms",
+            "session_prefill_tok_s",
+            "session_decode_tok_s",
+            "session_cached_tokens",
+            "session_kv_cache_perc",
             "started_at", "finished_at",
         )
         # Unix line endings, no \r anywhere.
@@ -134,6 +145,17 @@ class TestWriteSummaryCsv:
                 "session_turns": 24,
                 "session_success_rate": 1.0,
                 "session_max_input_tokens": 180000,
+                "input_tok_s": 400.0,
+                "prefill_tok_s": 380.0,
+                "decode_tok_s": 55.0,
+                "cached_tokens": 90,
+                "kv_cache_perc": 12.5,
+                "session_ttft_mean_ms": 80.0,
+                "session_tpot_mean_ms": 18.0,
+                "session_prefill_tok_s": 220.0,
+                "session_decode_tok_s": 40.0,
+                "session_cached_tokens": 1200,
+                "session_kv_cache_perc": 44.0,
             },
         )
         path = tmp_path / "summary.csv"
@@ -144,6 +166,17 @@ class TestWriteSummaryCsv:
         assert row["session_turns"] == "24"
         assert row["session_success_rate"] == "1.0"
         assert row["session_max_input_tokens"] == "180000"
+        assert row["input_tok_s"] == "400.0"
+        assert row["prefill_tok_s"] == "380.0"
+        assert row["decode_tok_s"] == "55.0"
+        assert row["cached_tokens"] == "90"
+        assert row["kv_cache_perc"] == "12.5"
+        assert row["session_ttft_mean_ms"] == "80.0"
+        assert row["session_tpot_mean_ms"] == "18.0"
+        assert row["session_prefill_tok_s"] == "220.0"
+        assert row["session_decode_tok_s"] == "40.0"
+        assert row["session_cached_tokens"] == "1200"
+        assert row["session_kv_cache_perc"] == "44.0"
 
 
 class TestWriteSummaryJson:

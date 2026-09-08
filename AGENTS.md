@@ -15,7 +15,7 @@ Six scorers ship (see `benchmark_suite/scoring/`):
 | `kld` | per-token KL divergence vs reference distribution | custom top-k KL on safetensors cache, or `llm-perf kl-divergence` |
 | `llm_judge` | 0–10 quality score from a judge LLM | native httpx (default, no Node) or `promptfoo` |
 | `agentic` | task pass rate | `inspect-ai` (primary) / `terminal-bench` (experimental) |
-| `sauce` | house-blend mixed workload (chat ladder + growing coding sessions) | native httpx `/v1/chat/completions` — original to this suite |
+| `sauce` | house-blend mixed workload (chat ladder + growing coding sessions); TTFT/TPOT/prefill/decode + KV | native httpx `/v1/chat/completions` — original to this suite |
 
 `PLAN.md` is the **source of truth for design decisions**. Read it before making schema or architecture changes.
 
@@ -76,7 +76,10 @@ benchmark_suite/
 │   ├── agentic.py          # inspect-ai primary, terminal-bench best-effort
 │   ├── sauce.py            # house-blend mixed workload (chat ladder + sessions)
 │   ├── chat_load.py        # sauce chat phase helper
-│   └── session.py          # sauce session phase helper
+│   ├── session.py          # sauce session phase helper
+│   ├── chat_http.py       # shared /v1/chat/completions + SSE TTFT
+│   ├── perf.py             # TTFT/TPOT/prefill/decode rates + cached tokens
+│   └── kv_metrics.py       # Prometheus KV-cache % scrape (best-effort)
 ├── workloads/
 │   ├── tokens.py          # 4-chars-per-token estimate + deterministic padding
 │   ├── chat_catalog.py    # 31 unique (system, task) pairs

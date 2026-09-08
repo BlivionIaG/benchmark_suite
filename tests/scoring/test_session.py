@@ -289,3 +289,45 @@ def test_session_http_failure_marks_session_failed(
     rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
     assert rec.status == ScoreStatus.FAILURE
     assert rec.metrics.get("failed") == 1 or rec.error
+
+
+def test_session_records_per_turn_latency_and_timeseries(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(return_value=_ok_response())
+    respx_mock.get(f"{ENDPOINT}/metrics").mock(
+        return_value=httpx.Response(200, text="vllm:gpu_cache_usage_perc 0.4\n")
+    )
+    recipe = _recipe(
+        stream=False,
+        n_sessions=1,
+        max_turns=3,
+        output_tokens=16,
+        output_reserve_tokens=256,
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.status == ScoreStatus.SUCCESS
+    assert rec.metrics["session_turns"] == 3
+    assert rec.metrics["session_ttft_mean_ms"] > 0
+    assert rec.metrics["session_prefill_tok_s"] > 0
+    assert rec.metrics["session_kv_cache_perc"] == 40.0
+    assert rec.metrics["kv_cache_perc"] == 40.0
+    data = json.loads((tmp_path / "artifacts" / "session_sessions.json").read_text())
+    turns = data["sessions"][0]["turns_detail"]
+    assert isinstance(turns, list)
+    assert len(turns) == 3
+    first = cast(dict[str, Any], turns[0])
+    assert first["turn"] == 0
+    assert "ttft_ms" in first
+    assert "prefill_tok_s" in first
+    assert first["kv_cache_perc"] == 40.0
+    ts = json.loads((tmp_path / "artifacts" / "session_timeseries.json").read_text())
+    events = ts["events"]
+    assert isinstance(events, list)
+    assert len(events) == 3
+    assert cast(dict[str, Any], events[0])["phase"] == "session"
+    assert cast(dict[str, Any], events[1])["turn"] == 1
+    sauce_ts = json.loads((tmp_path / "artifacts" / "sauce_timeseries.json").read_text())
+    assert len(sauce_ts["events"]) == 3

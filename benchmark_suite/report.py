@@ -35,6 +35,17 @@ SUMMARY_CSV_COLUMNS: tuple[str, ...] = (
     "session_turns",
     "session_success_rate",
     "session_max_input_tokens",
+    "input_tok_s",
+    "prefill_tok_s",
+    "decode_tok_s",
+    "cached_tokens",
+    "kv_cache_perc",
+    "session_ttft_mean_ms",
+    "session_tpot_mean_ms",
+    "session_prefill_tok_s",
+    "session_decode_tok_s",
+    "session_cached_tokens",
+    "session_kv_cache_perc",
     "started_at", "finished_at",
 )
 

@@ -66,6 +66,8 @@ def test_post_chat_completion_success(respx_mock: respx.MockRouter) -> None:
     assert rec.prompt_tokens == 8
     assert rec.completion_tokens == 2
     assert rec.prompt_id == "p1"
+    assert rec.cached_tokens is None
+    assert rec.started_unix_ms > 0
 
 
 def test_post_chat_completion_http_error_is_not_raised(
@@ -152,3 +154,33 @@ def test_run_concurrent_wave_preserves_item_order(respx_mock: respx.MockRouter) 
         )
     assert [r.prompt_id for r in results] == ["a", "b", "c"]
     assert all(r.ok for r in results)
+
+
+def test_post_chat_completion_reads_cached_tokens(respx_mock: respx.MockRouter) -> None:
+    respx_mock.post(URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "hello"}}],
+                "usage": {
+                    "prompt_tokens": 40,
+                    "completion_tokens": 2,
+                    "prompt_tokens_details": {"cached_tokens": 17},
+                },
+            },
+        )
+    )
+    with httpx.Client() as client:
+        rec = post_chat_completion(
+            client,
+            url=URL,
+            model="candidate",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=8,
+            temperature=0.2,
+            stream=False,
+            headers={},
+            prompt_id="p1",
+        )
+    assert rec.ok is True
+    assert rec.cached_tokens == 17

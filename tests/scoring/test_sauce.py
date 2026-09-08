@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import respx
@@ -31,7 +33,15 @@ def test_merge_sauce_records_combines_chat_and_session_metrics() -> None:
         kind="chat_load",
         cell_id="cell",
         status=ScoreStatus.SUCCESS,
-        metrics={"output_tok_s": 10.0, "successful": 16, "failed": 0, "duration_s": 2.0},
+        metrics={
+            "output_tok_s": 10.0,
+            "successful": 16,
+            "failed": 0,
+            "duration_s": 2.0,
+            "kv_cache_perc": 10.0,
+            "prefill_tok_s": 500.0,
+            "decode_tok_s": 80.0,
+        },
         artifacts={"chat_load_short_c16.json": "artifacts/chat_load_short_c16.json"},
         notes={"suites": []},
     )
@@ -43,10 +53,16 @@ def test_merge_sauce_records_combines_chat_and_session_metrics() -> None:
             "session_turns": 12,
             "session_success_rate": 1.0,
             "session_max_input_tokens": 180000,
+            "session_ttft_mean_ms": 90.0,
+            "session_tpot_mean_ms": 20.0,
+            "session_prefill_tok_s": 300.0,
+            "session_decode_tok_s": 40.0,
+            "session_kv_cache_perc": 33.0,
             "successful": 16,
             "failed": 0,
             "duration_s": 5.0,
             "output_tok_s": 1.0,
+            "kv_cache_perc": 33.0,
         },
         artifacts={"session_sessions.json": "artifacts/session_sessions.json"},
         notes={"budget": 197952},
@@ -57,6 +73,11 @@ def test_merge_sauce_records_combines_chat_and_session_metrics() -> None:
     assert merged.metrics["output_tok_s"] == 10.0
     assert merged.metrics["session_turns"] == 12
     assert merged.metrics["session_success_rate"] == 1.0
+    assert merged.metrics["session_ttft_mean_ms"] == 90.0
+    assert merged.metrics["session_prefill_tok_s"] == 300.0
+    assert merged.metrics["session_kv_cache_perc"] == 33.0
+    assert merged.metrics["kv_cache_perc"] == 33.0
+    assert merged.metrics["prefill_tok_s"] == 500.0
     assert merged.metrics["duration_s"] == 7.0
     assert merged.metrics["successful"] == 32
     assert "chat_load_short_c16.json" in merged.artifacts
@@ -221,3 +242,10 @@ def test_sauce_runs_chat_then_session(
     assert rec.metrics["session_turns"] == 2
     assert "chat" in rec.notes
     assert "session" in rec.notes
+    sauce_ts = tmp_path / "artifacts" / "sauce_timeseries.json"
+    assert sauce_ts.is_file()
+    payload = json.loads(sauce_ts.read_text())
+    events = payload["events"]
+    assert isinstance(events, list)
+    phases = {cast(dict[str, Any], e)["phase"] for e in events if isinstance(e, dict)}
+    assert phases == {"chat", "session"}

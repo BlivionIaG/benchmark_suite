@@ -10,6 +10,8 @@ from typing import Any, cast
 
 import httpx
 
+from benchmark_suite.scoring.perf import cached_tokens_from_usage, compact, latency_rates
+
 
 @dataclass
 class ChatCompletionResult:
@@ -23,6 +25,9 @@ class ChatCompletionResult:
     latency_ms: float
     prompt_tokens: int
     completion_tokens: int
+    cached_tokens: int | None = None
+    started_unix_ms: int = 0
+    finished_unix_ms: int = 0
 
 
 def chat_completions_url(endpoint_url: str) -> str:
@@ -115,6 +120,7 @@ def post_chat_completion(
     if stream:
         payload["stream_options"] = {"include_usage": True}
 
+    started_unix_ms = int(time.time() * 1000)
     t0 = time.perf_counter()
     try:
         if stream:
@@ -125,13 +131,15 @@ def post_chat_completion(
                 headers=headers,
                 prompt_id=prompt_id,
                 t0=t0,
+                started_unix_ms=started_unix_ms,
             )
         resp = client.post(url, json=payload, headers=headers)
         t1 = time.perf_counter()
         resp.raise_for_status()
         body = cast(dict[str, Any], resp.json())
         text = _message_text(body)
-        prompt_toks, completion_toks = _usage_ints(body.get("usage"))
+        usage = body.get("usage")
+        prompt_toks, completion_toks = _usage_ints(usage)
         if completion_toks <= 0 and text:
             completion_toks = max(1, len(text) // 4)
         if prompt_toks <= 0:
@@ -146,6 +154,9 @@ def post_chat_completion(
             latency_ms=latency_ms,
             prompt_tokens=prompt_toks,
             completion_tokens=completion_toks,
+            cached_tokens=cached_tokens_from_usage(usage),
+            started_unix_ms=started_unix_ms,
+            finished_unix_ms=int(time.time() * 1000),
         )
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
         t1 = time.perf_counter()
@@ -158,6 +169,9 @@ def post_chat_completion(
             latency_ms=(t1 - t0) * 1000.0,
             prompt_tokens=0,
             completion_tokens=0,
+            cached_tokens=None,
+            started_unix_ms=started_unix_ms,
+            finished_unix_ms=int(time.time() * 1000),
         )
 
 
@@ -169,6 +183,7 @@ def _post_stream(
     headers: dict[str, str],
     prompt_id: str,
     t0: float,
+    started_unix_ms: int,
 ) -> ChatCompletionResult:
     parts: list[str] = []
     usage_obj: object = None
@@ -213,6 +228,9 @@ def _post_stream(
         latency_ms=latency_ms,
         prompt_tokens=prompt_toks,
         completion_tokens=completion_toks,
+        cached_tokens=cached_tokens_from_usage(usage_obj),
+        started_unix_ms=started_unix_ms,
+        finished_unix_ms=int(time.time() * 1000),
     )
 
 
@@ -253,3 +271,32 @@ def run_concurrent_wave(
             idx = futs[fut]
             results[idx] = fut.result()
     return [results[i] for i in range(len(items))]
+
+
+def request_row(
+    result: ChatCompletionResult, *, kv_cache_perc: float | None = None
+) -> dict[str, Any]:
+    """One request as a compact artifact / timeseries event payload."""
+    rates = latency_rates(
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        ttft_ms=result.ttft_ms,
+        latency_ms=result.latency_ms,
+    )
+    return compact(
+        {
+            "prompt_id": result.prompt_id,
+            "ok": result.ok,
+            "error": result.error,
+            "t_unix_ms": result.started_unix_ms,
+            "ttft_ms": result.ttft_ms,
+            "tpot_ms": rates.tpot_ms,
+            "latency_ms": result.latency_ms,
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "cached_tokens": result.cached_tokens,
+            "prefill_tok_s": rates.prefill_tok_s,
+            "decode_tok_s": rates.decode_tok_s,
+            "kv_cache_perc": kv_cache_perc,
+        }
+    )

@@ -54,7 +54,9 @@ benchmark_suite/
 │   │   ├── sauce.py              # house-blend mixed workload (chat ladder + sessions)
 │   │   ├── chat_load.py          # sauce chat phase helper (not a public kind)
 │   │   ├── session.py            # sauce session phase helper
-│   │   └── chat_http.py          # shared /v1/chat/completions client
+│   │   ├── chat_http.py          # shared /v1/chat/completions client
+│   │   ├── perf.py              # TTFT/TPOT/prefill/decode + cached tokens
+│   │   └── kv_metrics.py        # Prometheus KV-cache % scrape
 │   ├── workloads/
 │   │   ├── tokens.py             # 4-chars-per-token estimate + deterministic padding
 │   │   ├── chat_catalog.py      # 31 unique (system, task) pairs
@@ -83,7 +85,9 @@ benchmark_suite/
 │       ├── test_agentic.py        # inspect argv build; missing-binary errors
 │       ├── test_sauce.py         # kind=sauce merge + chat-then-session
 │       ├── test_chat_load.py     # sauce chat phase (ladder / skip / http)
-│       └── test_session.py       # sauce session phase (growth / http)
+│       ├── test_session.py       # sauce session phase (growth / http)
+│       ├── test_perf.py          # prefill/decode/TPOT formulas + cached tokens
+│       └── test_kv_metrics.py     # Prometheus KV-cache parse + /metrics scrape
 └── results/                       # gitignored
 ```
 
@@ -330,6 +334,8 @@ class SauceScorer(BaseModel):
     kind: Literal["sauce"] = "sauce"
     chat: SauceChatSection = Field(default_factory=SauceChatSection)
     session: SauceSessionSection = Field(default_factory=SauceSessionSection)
+    kv_metrics: bool = True                 # GET {endpoint}/metrics after each wave/turn
+    kv_metrics_path: str = "/metrics"        # Prometheus path; trailing /v1 is stripped
     # validator: at least one of chat.enabled / session.enabled
 
 
@@ -427,7 +433,9 @@ Shipped as `recipes/sauce.yaml`. Original to this suite — not a wrapper around
 
 **session phase**: one Pi-style coding-agent system prompt, 16 distinct coding tasks, then 12 follow-ups per task (feature, failing test, bug, refactor, logging, perf, errors, docs, UX, persistence, extra module, release). Conversation history is real (assistant replies are kept). Input targets grow linearly toward `min(max_context_tokens, max_model_len) - output_reserve` so an 8k window does fewer turns than a 200k window. This is *not* inspect-ai (`kind: agentic`); it is an HTTP session simulation.
 
-Chat metrics (`output_tok_s`, TTFT, …) come from the chat phase; `session_*` columns come from the session phase; `duration_s` / `successful` / `failed` are summed. Overall SUCCESS if any enabled phase succeeded.
+Chat metrics (`output_tok_s`, TTFT, TPOT, prefill tok/s, decode tok/s) come from the chat phase; `session_*` columns come from the session phase; `duration_s` / `successful` / `failed` are summed. Overall SUCCESS if any enabled phase succeeded.
+
+**Latency + KV tracking.** Streaming (`stream: true`, the default) splits TTFT from decode: prefill tok/s = `prompt_tokens / ttft`, decode tok/s and TPOT exclude the first output token. Non-streaming replies set TTFT = end-to-end latency, so decode/TPOT are omitted. Cached tokens are read from OpenAI-compatible `usage.prompt_tokens_details.cached_tokens` (best-effort). KV-cache % is sampled once per chat wave and after each session turn via `GET {endpoint}/metrics` (Prometheus gauges such as `vllm:gpu_cache_usage_perc`); 404/missing series → omit, never 0. Per-request and per-turn rows land in `artifacts/chat_timeseries.json`, `session_timeseries.json`, and the merged `sauce_timeseries.json`. Disable the scrape with `kv_metrics: false`.
 
 ---
 

@@ -99,6 +99,8 @@ def test_scorer_discrimination() -> None:
     assert sauce.chat.suites[1].input_tokens == 16384
     assert sauce.session.max_context_tokens == 200_000
     assert sauce.session.n_sessions == 16
+    assert sauce.kv_metrics is True
+    assert sauce.kv_metrics_path == "/metrics"
 
 
 def test_sauce_rejects_unknown_ladder_rung() -> None:

@@ -369,9 +369,12 @@ House-blend mixed workload original to this suite — not a wrapper around llm-p
 
 **Coding sessions.** One shared Pi-style coding-agent system prompt, 16 distinct coding tasks, then 12 follow-ups (add a feature, failing tests, bugfix, refactor, …). Context grows toward `min(max_context_tokens, resources.max_model_len)` so an 8k window does fewer turns than a 200k window.
 
+**Latency + KV.** Sauce measures TTFT, TPOT, prefill tok/s, and decode tok/s on every chat request and every session turn (streaming required for a real decode split). Cached tokens come from `usage` when the server reports them. KV-cache % is sampled from Prometheus `GET /metrics` after each chat wave and session turn (vLLM `gpu_cache_usage_perc` and friends; 404 → omitted). Timeseries land in `artifacts/sauce_timeseries.json`. Set `kv_metrics: false` to skip the scrape.
+
 ```yaml
 scoring:
   - kind: sauce
+    kv_metrics: true
     chat:
       ladder: [16, 8, 4, 2, 1]
       suites:

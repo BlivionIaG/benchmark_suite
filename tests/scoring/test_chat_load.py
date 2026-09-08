@@ -284,3 +284,130 @@ def test_chat_sends_bearer_token_from_env(
     SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
     calls = cast(list[Call], list(route.calls))
     assert calls[0].request.headers["Authorization"] == "Bearer sk-sauce"
+
+
+def test_chat_records_prefill_and_timeseries(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(return_value=_ok_response())
+    recipe = _recipe(
+        stream=False,
+        ladder=[1],
+        suites=[{"name": "short", "input_tokens": 64, "output_tokens": 8}],
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.status == ScoreStatus.SUCCESS
+    assert rec.metrics["ttft_mean_ms"] > 0
+    assert rec.metrics["input_tok_s"] > 0
+    assert rec.metrics["prefill_tok_s"] > 0
+    assert "decode_tok_s" not in rec.metrics  # non-stream: no TTFT/decode split
+    ts_path = tmp_path / "artifacts" / "chat_timeseries.json"
+    assert ts_path.is_file()
+    payload = json.loads(ts_path.read_text())
+    events = payload["events"]
+    assert isinstance(events, list)
+    assert len(events) == 1
+    event = cast(dict[str, Any], events[0])
+    assert event["phase"] == "chat"
+    assert event["ok"] is True
+    assert "ttft_ms" in event
+    assert "prefill_tok_s" in event
+    assert (tmp_path / "artifacts" / "sauce_timeseries.json").is_file()
+    wave = json.loads((tmp_path / "artifacts" / "chat_load_short_c1.json").read_text())
+    assert wave["results"][0]["prompt_tokens"] == 80
+    assert "prefill_tok_s" in wave["results"][0]
+
+
+def test_chat_records_kv_cache_from_metrics(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(return_value=_ok_response())
+    respx_mock.get(f"{ENDPOINT}/metrics").mock(
+        return_value=httpx.Response(200, text="vllm:gpu_cache_usage_perc 0.25\n")
+    )
+    recipe = _recipe(
+        stream=False,
+        ladder=[1],
+        suites=[{"name": "short", "input_tokens": 64, "output_tokens": 8}],
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.metrics["kv_cache_perc"] == 25.0
+    ts = json.loads((tmp_path / "artifacts" / "chat_timeseries.json").read_text())
+    samples = ts["samples"]
+    assert isinstance(samples, list)
+    assert samples
+    assert cast(dict[str, Any], samples[0])["kv_cache_perc"] == 25.0
+
+
+def test_chat_kv_metrics_can_be_disabled(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(return_value=_ok_response())
+    recipe = Recipe.model_validate(
+        {
+            "meta": {"name": "sauce-chat-no-kv"},
+            "backend": {"type": "external"},
+            "endpoint": {"url": ENDPOINT, "model_name": "candidate"},
+            "resources": {"max_model_len": 4096},
+            "bench": {
+                "scoring": [
+                    {
+                        "kind": "sauce",
+                        "kv_metrics": False,
+                        "chat": {
+                            "stream": False,
+                            "ladder": [1],
+                            "suites": [
+                                {"name": "short", "input_tokens": 64, "output_tokens": 8}
+                            ],
+                        },
+                        "session": {"enabled": False},
+                    }
+                ]
+            },
+        }
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.status == ScoreStatus.SUCCESS
+    assert "kv_cache_perc" not in rec.metrics
+    ts = json.loads((tmp_path / "artifacts" / "chat_timeseries.json").read_text())
+    assert ts["samples"] == []
+
+
+def test_chat_stream_records_decode_tok_s(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    sse = (
+        'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+        'data: {"usage":{"prompt_tokens":80,"completion_tokens":8}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200, content=sse.encode(), headers={"content-type": "text/event-stream"}
+        )
+    )
+    recipe = _recipe(
+        stream=True,
+        ladder=[1],
+        suites=[{"name": "short", "input_tokens": 64, "output_tokens": 8}],
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.status == ScoreStatus.SUCCESS
+    wave = json.loads((tmp_path / "artifacts" / "chat_load_short_c1.json").read_text())
+    row = wave["results"][0]
+    # Instant mock streams can collapse TTFT and E2E; decode is present only
+    # when there is a measurable generation window after the first token.
+    assert "ttft_ms" in row
+    assert "prefill_tok_s" in row
+    if rec.metrics.get("decode_tok_s") is not None:
+        assert rec.metrics["decode_tok_s"] > 0

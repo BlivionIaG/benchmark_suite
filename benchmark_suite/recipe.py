@@ -300,6 +300,8 @@ class SauceScorer(BaseModel):
     kind: Literal["sauce"] = "sauce"
     chat: SauceChatSection = Field(default_factory=SauceChatSection)
     session: SauceSessionSection = Field(default_factory=SauceSessionSection)
+    kv_metrics: bool = True
+    kv_metrics_path: str = "/metrics"
 
     @model_validator(mode="after")
     def _at_least_one_phase(self) -> SauceScorer:

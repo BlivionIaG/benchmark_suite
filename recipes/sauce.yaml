@@ -19,6 +19,7 @@ bench:
   load: {}
   scoring:
     - kind: sauce
+      kv_metrics: true
       chat:
         ladder: [16, 8, 4, 2, 1]
         suites:
