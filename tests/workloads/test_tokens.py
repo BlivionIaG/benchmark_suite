@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from benchmark_suite.workloads.tokens import (
     CHARS_PER_TOKEN,
     approx_tokens,
@@ -50,3 +52,17 @@ def test_pad_last_user_to_total_pads_only_user() -> None:
     assert padded[0]["content"] == messages[0]["content"]
     assert padded[1]["content"].startswith("do the thing")
     assert content_tokens(padded) == 40
+
+
+def test_pad_last_user_to_total_requires_last_user() -> None:
+    messages = [{"role": "system", "content": "only system"}]
+    with pytest.raises(ValueError, match="role=user"):
+        pad_last_user_to_total(messages, 40, seed="x")
+
+
+def test_content_tokens_sums_messages() -> None:
+    messages = [
+        {"role": "system", "content": "abcd"},
+        {"role": "user", "content": "efghijkl"},
+    ]
+    assert content_tokens(messages) == 3

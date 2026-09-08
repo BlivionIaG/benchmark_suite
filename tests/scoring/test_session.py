@@ -13,7 +13,11 @@ from respx.models import Call
 from benchmark_suite.recipe import Recipe, SauceScorer
 from benchmark_suite.scoring.base import ScoreStatus
 from benchmark_suite.scoring.sauce import SauceScorerImpl
-from benchmark_suite.workloads.session_catalog import plan_turn_input_targets
+from benchmark_suite.workloads.session_catalog import (
+    SESSION_SPECS,
+    plan_turn_input_targets,
+    session_followups,
+)
 
 ENDPOINT = "http://127.0.0.1:8000"
 
@@ -98,6 +102,159 @@ def test_session_messages_grow_and_keep_system_prompt(
     assert rec.metrics["session_success_rate"] == 1.0
     assert rec.metrics["successful"] == 1
     assert (tmp_path / "artifacts" / "session_sessions.json").is_file()
+
+
+def test_session_keeps_assistant_reply_and_sends_followup(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    route = respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(
+        return_value=_ok_response()
+    )
+    recipe = _recipe(
+        stream=False,
+        n_sessions=1,
+        max_turns=2,
+        output_tokens=16,
+        output_reserve_tokens=256,
+        temperature=0.15,
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.status == ScoreStatus.SUCCESS
+    bodies = _bodies(route)
+    assert len(bodies) == 2
+    assert bodies[0]["temperature"] == 0.15
+    second = bodies[1]["messages"]
+    assert isinstance(second, list)
+    typed = cast(list[object], second)
+    roles = [
+        str(cast(dict[str, Any], m)["role"])
+        for m in typed
+        if isinstance(m, dict)
+    ]
+    assert roles[0] == "system"
+    assert "assistant" in roles
+    assistant_text = [
+        str(cast(dict[str, Any], m)["content"])
+        for m in typed
+        if isinstance(m, dict) and cast(dict[str, Any], m)["role"] == "assistant"
+    ]
+    assert any("patched module_1.py" in text for text in assistant_text)
+    spec = SESSION_SPECS[0]
+    last = typed[-1]
+    assert isinstance(last, dict)
+    assert spec.feature in str(cast(dict[str, Any], last)["content"])
+    assert spec.feature in session_followups(spec)[0]
+
+
+def test_session_n_sessions_two_runs_two_conversations(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(
+        return_value=_ok_response()
+    )
+    recipe = _recipe(
+        stream=False,
+        n_sessions=2,
+        max_turns=1,
+        output_tokens=16,
+        output_reserve_tokens=256,
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.status == ScoreStatus.SUCCESS
+    assert rec.metrics["successful"] == 2
+    session_notes_obj: object = rec.notes["session"]
+    assert isinstance(session_notes_obj, dict)
+    session_notes = cast(dict[str, Any], session_notes_obj)
+    sessions_obj: object = session_notes["sessions"]
+    assert isinstance(sessions_obj, list)
+    ids = [
+        str(cast(dict[str, Any], row)["session_id"])
+        for row in cast(list[object], sessions_obj)
+        if isinstance(row, dict)
+    ]
+    assert ids == [SESSION_SPECS[0].session_id, SESSION_SPECS[1].session_id]
+
+
+def test_session_budget_too_small_fails(tmp_path: Path) -> None:
+    recipe = Recipe.model_validate(
+        {
+            "meta": {"name": "sauce-session-tiny"},
+            "backend": {"type": "external"},
+            "endpoint": {"url": ENDPOINT, "model_name": "candidate"},
+            "resources": {"max_model_len": 200},
+            "bench": {
+                "scoring": [
+                    {
+                        "kind": "sauce",
+                        "chat": {"enabled": False},
+                        "session": {
+                            "stream": False,
+                            "n_sessions": 1,
+                            "output_tokens": 1024,
+                            "output_reserve_tokens": 2048,
+                        },
+                    }
+                ]
+            },
+        }
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.status == ScoreStatus.FAILURE
+    assert rec.error is not None
+    assert "session:" in rec.error
+    assert "too small" in rec.error
+
+
+def test_session_small_max_model_len_plans_fewer_turns(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(
+        return_value=_ok_response()
+    )
+
+    def _score(max_model_len: int) -> list[object]:
+        recipe = Recipe.model_validate(
+            {
+                "meta": {"name": f"sauce-session-len-{max_model_len}"},
+                "backend": {"type": "external"},
+                "endpoint": {"url": ENDPOINT, "model_name": "candidate"},
+                "resources": {"max_model_len": max_model_len},
+                "bench": {
+                    "scoring": [
+                        {
+                            "kind": "sauce",
+                            "chat": {"enabled": False},
+                            "session": {
+                                "stream": False,
+                                "n_sessions": 1,
+                                "max_context_tokens": 200000,
+                                "output_tokens": 16,
+                                "output_reserve_tokens": 256,
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+        cfg = recipe.bench.scoring[0]
+        assert isinstance(cfg, SauceScorer)
+        rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path / str(max_model_len))
+        session_notes_obj: object = rec.notes["session"]
+        assert isinstance(session_notes_obj, dict)
+        session_notes = cast(dict[str, Any], session_notes_obj)
+        targets_obj: object = session_notes["turn_targets"]
+        assert isinstance(targets_obj, list)
+        return cast(list[object], targets_obj)
+
+    small = _score(4096)
+    large = _score(200000)
+    assert len(small) < len(large)
 
 
 def test_session_small_context_plans_fewer_turns_than_200k() -> None:

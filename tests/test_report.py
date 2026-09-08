@@ -126,6 +126,26 @@ class TestWriteSummaryCsv:
         assert row["agentic_accuracy"] == ""
 
 
+    def test_write_summary_csv_sauce_session_columns(self, tmp_path: Path) -> None:
+        score = make_score(
+            kind="sauce",
+            metrics={
+                "output_tok_s": 12.5,
+                "session_turns": 24,
+                "session_success_rate": 1.0,
+                "session_max_input_tokens": 180000,
+            },
+        )
+        path = tmp_path / "summary.csv"
+        write_summary_csv([score], path)
+        row = read_csv_rows(path)[0]
+        assert row["scorer_kind"] == "sauce"
+        assert row["output_tok_s"] == "12.5"
+        assert row["session_turns"] == "24"
+        assert row["session_success_rate"] == "1.0"
+        assert row["session_max_input_tokens"] == "180000"
+
+
 class TestWriteSummaryJson:
     def test_write_summary_json_round_trip(self, tmp_path: Path) -> None:
         """summary.json holds the recipe dump plus one to_dict per score."""

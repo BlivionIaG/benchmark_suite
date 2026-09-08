@@ -44,6 +44,7 @@ class TestMetricDirection:
         assert _metric_direction("successful") == "higher_better"
         assert _metric_direction("agentic_accuracy") == "higher_better"
         assert _metric_direction("session_success_rate") == "higher_better"
+        assert _metric_direction("session_turns") == "higher_better"
 
     def test_metric_direction_lower_better(self) -> None:
         assert _metric_direction("ttft_mean_ms") == "lower_better"

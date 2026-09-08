@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import respx
 
-from benchmark_suite.recipe import Recipe, SauceScorer
+from benchmark_suite.recipe import BenchSection, Recipe, SauceScorer
 from benchmark_suite.scoring.base import ScoreRecord, ScorerRegistry, ScoreStatus
 from benchmark_suite.scoring.sauce import SauceScorerImpl, merge_sauce_records
 
@@ -63,6 +63,22 @@ def test_merge_sauce_records_combines_chat_and_session_metrics() -> None:
     assert "session_sessions.json" in merged.artifacts
 
 
+def _record(
+    *,
+    kind: str,
+    status: str,
+    metrics: dict[str, float | int | str] | None = None,
+    error: str | None = None,
+) -> ScoreRecord:
+    return ScoreRecord(
+        kind=kind,
+        cell_id="cell",
+        status=status,
+        metrics=metrics or {},
+        error=error,
+    )
+
+
 def test_merge_session_only_keeps_session_throughput() -> None:
     session = ScoreRecord(
         kind="session",
@@ -84,10 +100,83 @@ def test_merge_session_only_keeps_session_throughput() -> None:
     assert merged.metrics["session_turns"] == 3
 
 
+def test_merge_chat_only_keeps_chat_metrics() -> None:
+    chat = _record(
+        kind="chat_load",
+        status=ScoreStatus.SUCCESS,
+        metrics={"output_tok_s": 9.0, "successful": 4, "failed": 0, "duration_s": 1.5},
+    )
+    merged = merge_sauce_records(cell_id="cell", started=T0, chat=chat, session=None)
+    assert merged.status == ScoreStatus.SUCCESS
+    assert merged.metrics["output_tok_s"] == 9.0
+    assert "session_turns" not in merged.metrics
+
+
+def test_merge_empty_phases_is_failure() -> None:
+    merged = merge_sauce_records(cell_id="cell", started=T0, chat=None, session=None)
+    assert merged.status == ScoreStatus.FAILURE
+    assert merged.error == "sauce produced no successful phase"
+
+
+def test_merge_chat_failure_session_success_is_overall_success() -> None:
+    chat = _record(
+        kind="chat_load",
+        status=ScoreStatus.FAILURE,
+        error="all chat_load requests failed",
+        metrics={"successful": 0, "failed": 1, "duration_s": 0.2},
+    )
+    session = _record(
+        kind="session",
+        status=ScoreStatus.SUCCESS,
+        metrics={"session_turns": 2, "successful": 1, "failed": 0, "duration_s": 1.0},
+    )
+    merged = merge_sauce_records(cell_id="cell", started=T0, chat=chat, session=session)
+    assert merged.status == ScoreStatus.SUCCESS
+    assert merged.error is not None
+    assert "chat:" in merged.error
+    assert merged.metrics["session_turns"] == 2
+
+
+def test_merge_chat_success_session_failure_is_overall_success() -> None:
+    chat = _record(
+        kind="chat_load",
+        status=ScoreStatus.SUCCESS,
+        metrics={"output_tok_s": 3.0, "successful": 1, "failed": 0, "duration_s": 0.4},
+    )
+    session = _record(
+        kind="session",
+        status=ScoreStatus.FAILURE,
+        error="all sessions failed",
+        metrics={"successful": 0, "failed": 1, "duration_s": 0.1},
+    )
+    merged = merge_sauce_records(cell_id="cell", started=T0, chat=chat, session=session)
+    assert merged.status == ScoreStatus.SUCCESS
+    assert merged.error is not None
+    assert "session:" in merged.error
+    assert merged.metrics["output_tok_s"] == 3.0
+
+
+def test_merge_both_phases_failed_is_failure() -> None:
+    chat = _record(kind="chat_load", status=ScoreStatus.FAILURE, error="chat boom")
+    session = _record(kind="session", status=ScoreStatus.FAILURE, error="session boom")
+    merged = merge_sauce_records(cell_id="cell", started=T0, chat=chat, session=session)
+    assert merged.status == ScoreStatus.FAILURE
+    assert merged.error is not None
+    assert "chat:" in merged.error
+    assert "session:" in merged.error
+
+
 def test_sauce_is_registered_and_legacy_kinds_are_not() -> None:
     assert ScorerRegistry.get("sauce") is SauceScorerImpl
     assert ScorerRegistry.get("chat_load") is None
     assert ScorerRegistry.get("session") is None
+
+
+def test_build_scorers_returns_sauce_impl() -> None:
+    bench = BenchSection(scoring=[SauceScorer()])
+    scorers = ScorerRegistry.build_scorers(bench)
+    assert len(scorers) == 1
+    assert isinstance(scorers[0], SauceScorerImpl)
 
 
 def test_sauce_runs_chat_then_session(

@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import Counter
 from itertools import pairwise
 
+import pytest
+
 from benchmark_suite.workloads.chat_catalog import (
     CHAT_LADDER,
     CHAT_PROMPTS,
@@ -17,6 +19,7 @@ from benchmark_suite.workloads.session_catalog import (
     SESSION_SYSTEM_PROMPT,
     plan_turn_input_targets,
     session_followups,
+    workspace_blob,
 )
 from benchmark_suite.workloads.tokens import approx_tokens, content_tokens
 
@@ -76,3 +79,25 @@ def test_plan_turn_input_targets_grows_and_clips_for_small_context() -> None:
 
 def test_session_system_prompt_is_substantial() -> None:
     assert approx_tokens(SESSION_SYSTEM_PROMPT) >= 400
+
+
+def test_prompts_for_concurrency_unknown_rung_raises() -> None:
+    with pytest.raises(ValueError, match="no chat prompts"):
+        prompts_for_concurrency(32)
+
+
+def test_plan_turn_input_targets_max_turns_one_is_budget_only() -> None:
+    assert plan_turn_input_targets(budget=8000, max_turns=1) == [8000]
+
+
+def test_plan_turn_input_targets_rejects_non_positive() -> None:
+    with pytest.raises(ValueError):
+        plan_turn_input_targets(budget=0)
+    with pytest.raises(ValueError):
+        plan_turn_input_targets(budget=1000, max_turns=0)
+
+
+def test_workspace_blob_names_session_and_turn() -> None:
+    blob = workspace_blob("library-rest-api", 3, extra_tokens=0)
+    assert "library-rest-api" in blob
+    assert "turn 3" in blob

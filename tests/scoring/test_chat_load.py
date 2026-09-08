@@ -15,6 +15,8 @@ from respx.models import Call
 from benchmark_suite.recipe import Recipe, SauceScorer
 from benchmark_suite.scoring.base import ScoreStatus
 from benchmark_suite.scoring.sauce import SauceScorerImpl
+from benchmark_suite.workloads.chat_catalog import prompts_for_concurrency
+from benchmark_suite.workloads.tokens import content_tokens
 
 ENDPOINT = "http://127.0.0.1:8000"
 
@@ -156,3 +158,129 @@ def test_chat_load_endpoint_failure_is_recorded(
 def test_chat_load_unknown_ladder_rejected_by_schema() -> None:
     with pytest.raises(ValidationError):
         _recipe(ladder=[3])
+
+
+def test_chat_ladder_posts_thirty_one_distinct_systems(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    route = respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(
+        return_value=_ok_response()
+    )
+    recipe = _recipe(
+        stream=False,
+        ladder=[16, 8, 4, 2, 1],
+        suites=[{"name": "short", "input_tokens": 128, "output_tokens": 8}],
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.status == ScoreStatus.SUCCESS
+    assert route.call_count == 31
+    systems = [str(_first_message(body)["content"]) for body in _bodies(route)]
+    assert len(set(systems)) == 31
+    assert rec.metrics["successful"] == 31
+
+
+def test_chat_user_message_keeps_task_and_hits_budget(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    route = respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(
+        return_value=_ok_response()
+    )
+    recipe = _recipe(
+        stream=False,
+        ladder=[1],
+        suites=[{"name": "short", "input_tokens": 256, "output_tokens": 8}],
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    body = _bodies(route)[0]
+    messages = body["messages"]
+    assert isinstance(messages, list)
+    user: object = cast(list[object], messages)[1]
+    assert isinstance(user, dict)
+    user_d = cast(dict[str, Any], user)
+    spec = prompts_for_concurrency(1)[0]
+    assert spec.task in str(user_d["content"])
+    typed_messages = [cast(dict[str, str], m) for m in cast(list[object], messages)]
+    assert content_tokens(typed_messages) == 256
+
+
+def test_chat_forwards_temperature_and_stream_options(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    route = respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(
+        return_value=_ok_response()
+    )
+    recipe = _recipe(
+        stream=True,
+        temperature=0.25,
+        ladder=[1],
+        suites=[{"name": "short", "input_tokens": 64, "output_tokens": 8}],
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    body = _bodies(route)[0]
+    assert body["temperature"] == 0.25
+    assert body["stream"] is True
+    assert body["stream_options"] == {"include_usage": True}
+
+
+def test_chat_skip_all_suites_is_failure(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(return_value=_ok_response())
+    recipe = Recipe.model_validate(
+        {
+            "meta": {"name": "sauce-chat-skip-all"},
+            "backend": {"type": "external"},
+            "endpoint": {"url": ENDPOINT, "model_name": "candidate"},
+            "resources": {"max_model_len": 10},
+            "bench": {
+                "scoring": [
+                    {
+                        "kind": "sauce",
+                        "chat": {
+                            "stream": False,
+                            "ladder": [1],
+                            "suites": [
+                                {"name": "short", "input_tokens": 128, "output_tokens": 8}
+                            ],
+                        },
+                        "session": {"enabled": False},
+                    }
+                ]
+            },
+        }
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    rec = SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    assert rec.status == ScoreStatus.FAILURE
+    assert rec.error is not None
+    assert "chat:" in rec.error
+    chat_notes = _chat_notes(rec.notes)
+    skipped = chat_notes["skipped_suites"]
+    assert isinstance(skipped, list)
+    assert skipped
+
+
+def test_chat_sends_bearer_token_from_env(
+    respx_mock: respx.MockRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-sauce")
+    route = respx_mock.post(f"{ENDPOINT}/v1/chat/completions").mock(
+        return_value=_ok_response()
+    )
+    recipe = _recipe(
+        stream=False,
+        ladder=[1],
+        suites=[{"name": "short", "input_tokens": 64, "output_tokens": 8}],
+    )
+    cfg = recipe.bench.scoring[0]
+    assert isinstance(cfg, SauceScorer)
+    SauceScorerImpl(cfg).score(recipe, result_dir=tmp_path)
+    calls = cast(list[Call], list(route.calls))
+    assert calls[0].request.headers["Authorization"] == "Bearer sk-sauce"

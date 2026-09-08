@@ -277,6 +277,31 @@ def test_doctor_ok_when_everything_present(
     assert report["scorers"]["throughput"]["available"] is True
 
 
+def test_doctor_dry_run_shipped_recipes_are_valid(
+    mock_endpoint_down: respx.MockRouter,
+) -> None:
+    recipes_dir = Path(__file__).resolve().parent.parent / "recipes"
+    paths = sorted(recipes_dir.glob("*.yaml"))
+    assert paths, "expected shipped recipes"
+    for recipe_path in paths:
+        result = runner.invoke(cli.app, ["doctor", str(recipe_path), "--dry-run"])
+        assert result.exit_code == 0, recipe_path.name
+        report = json.loads(result.output)
+        assert report["recipe"]["valid"] is True, recipe_path.name
+
+
+def test_doctor_sauce_scorer_needs_no_binaries(
+    mock_endpoint_down: respx.MockRouter,
+) -> None:
+    recipe = Path(__file__).resolve().parent.parent / "recipes" / "sauce.yaml"
+    result = runner.invoke(cli.app, ["doctor", str(recipe), "--dry-run"])
+    assert result.exit_code == 0
+    report = json.loads(result.output)
+    assert report["recipe"]["valid"] is True
+    assert report["scorers"]["sauce"]["available"] is True
+    assert report["scorers"]["sauce"]["missing"] == []
+
+
 # ----- run -----
 
 

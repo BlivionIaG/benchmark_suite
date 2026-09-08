@@ -159,6 +159,58 @@ def test_unknown_legacy_session_kind_rejected() -> None:
         )
 
 
+def test_sauce_rejects_empty_ladder() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "sauce", "chat": {"ladder": []}}]},
+            }
+        )
+
+
+def test_sauce_rejects_empty_suites() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "sauce", "chat": {"suites": []}}]},
+            }
+        )
+
+
+def test_sauce_rejects_duplicate_suite_names() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {
+                    "scoring": [
+                        {
+                            "kind": "sauce",
+                            "chat": {
+                                "suites": [
+                                    {"name": "short", "input_tokens": 64, "output_tokens": 8},
+                                    {"name": "short", "input_tokens": 128, "output_tokens": 8},
+                                ]
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+
+def test_sauce_rejects_n_sessions_above_catalog() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "sauce", "session": {"n_sessions": 17}}]},
+            }
+        )
+
+
 def test_unknown_scorer_kind() -> None:
     with pytest.raises(ValidationError):
         Recipe.model_validate(
