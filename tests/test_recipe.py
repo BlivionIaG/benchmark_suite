@@ -11,6 +11,7 @@ from benchmark_suite.recipe import (
     CANONICAL_ENV,
     KLDScorer,
     Recipe,
+    SauceScorer,
     ThroughputScorer,
     load_recipe,
 )
@@ -51,6 +52,7 @@ def test_load_full_recipe(tmp_path: Path) -> None:
                 {"kind": "perplexity", "tasks": ["wikitext"]},
                 {"kind": "llm_judge", "driver": "native"},
                 {"kind": "agentic", "harness": "inspect"},
+                {"kind": "sauce"},
             ],
             "stop_conditions": {"max_duration_s": 3600.0},
         },
@@ -64,7 +66,7 @@ def test_load_full_recipe(tmp_path: Path) -> None:
     assert r.meta.tags == ["a", "b"]
     assert r.resources.tensor_parallel_size == 4
     assert r.resources.dtype == "float16"
-    assert len(r.bench.scoring) == 5
+    assert len(r.bench.scoring) == 6
     assert r.bench.stop_conditions.max_duration_s == 3600.0
     assert r.cell.render() == "dense_fardna2_rdna2_cg1_mtp2"
 
@@ -82,12 +84,133 @@ def test_scorer_discrimination() -> None:
                 "scoring": [
                     {"kind": "throughput", "tool": "llm-perf"},
                     {"kind": "kld", "source": "logits_dir"},
+                    {"kind": "sauce"},
                 ]
             },
         }
     )
     assert isinstance(r.bench.scoring[0], ThroughputScorer)
     assert isinstance(r.bench.scoring[1], KLDScorer)
+    assert isinstance(r.bench.scoring[2], SauceScorer)
+    sauce = r.bench.scoring[2]
+    assert sauce.chat.ladder == [16, 8, 4, 2, 1]
+    assert [s.name for s in sauce.chat.suites] == ["short", "long"]
+    assert sauce.chat.suites[0].input_tokens == 1024
+    assert sauce.chat.suites[1].input_tokens == 16384
+    assert sauce.session.max_context_tokens == 200_000
+    assert sauce.session.n_sessions == 16
+    assert sauce.kv_metrics is True
+    assert sauce.kv_metrics_path == "/metrics"
+
+
+def test_sauce_rejects_unknown_ladder_rung() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "sauce", "chat": {"ladder": [32]}}]},
+            }
+        )
+
+
+def test_sauce_session_n_sessions_bounds() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "sauce", "session": {"n_sessions": 0}}]},
+            }
+        )
+
+
+def test_sauce_requires_at_least_one_phase() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {
+                    "scoring": [
+                        {
+                            "kind": "sauce",
+                            "chat": {"enabled": False},
+                            "session": {"enabled": False},
+                        }
+                    ]
+                },
+            }
+        )
+
+
+def test_unknown_legacy_chat_load_kind_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "chat_load"}]},
+            }
+        )
+
+
+def test_unknown_legacy_session_kind_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "session"}]},
+            }
+        )
+
+
+def test_sauce_rejects_empty_ladder() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "sauce", "chat": {"ladder": []}}]},
+            }
+        )
+
+
+def test_sauce_rejects_empty_suites() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "sauce", "chat": {"suites": []}}]},
+            }
+        )
+
+
+def test_sauce_rejects_duplicate_suite_names() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {
+                    "scoring": [
+                        {
+                            "kind": "sauce",
+                            "chat": {
+                                "suites": [
+                                    {"name": "short", "input_tokens": 64, "output_tokens": 8},
+                                    {"name": "short", "input_tokens": 128, "output_tokens": 8},
+                                ]
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+
+def test_sauce_rejects_n_sessions_above_catalog() -> None:
+    with pytest.raises(ValidationError):
+        Recipe.model_validate(
+            {
+                "meta": {"name": "x", "description": "y"},
+                "bench": {"scoring": [{"kind": "sauce", "session": {"n_sessions": 17}}]},
+            }
+        )
 
 
 def test_unknown_scorer_kind() -> None:

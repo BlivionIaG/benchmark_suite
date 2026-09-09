@@ -6,7 +6,7 @@ This file is the **first thing an agent reads**. It's structured so you can answ
 
 `bs` — a CLI that runs reproducible benchmarks against any OpenAI-compatible LLM endpoint (vLLM, llama.cpp server, TGI, OpenAI API). Recipes are YAML; scorers are pluggable; results land in `results/<name>_<ts>/<cell_id>/`.
 
-Five scorers ship (see `benchmark_suite/scoring/`):
+Six scorers ship (see `benchmark_suite/scoring/`):
 
 | `kind` | What it measures | Tool |
 |---|---|---|
@@ -15,6 +15,7 @@ Five scorers ship (see `benchmark_suite/scoring/`):
 | `kld` | per-token KL divergence vs reference distribution | custom top-k KL on safetensors cache, or `llm-perf kl-divergence` |
 | `llm_judge` | 0–10 quality score from a judge LLM | native httpx (default, no Node) or `promptfoo` |
 | `agentic` | task pass rate | `inspect-ai` (primary) / `terminal-bench` (experimental) |
+| `sauce` | house-blend mixed workload (chat ladder + growing coding sessions); TTFT/TPOT/prefill/decode + KV | native httpx `/v1/chat/completions` — original to this suite |
 
 `PLAN.md` is the **source of truth for design decisions**. Read it before making schema or architecture changes.
 
@@ -72,13 +73,23 @@ benchmark_suite/
 │   ├── perplexity.py       # lm-eval subprocess → ScoreRecord
 │   ├── kl_divergence.py    # safetensors top-k KL (vocab-checked, vocab-mismatch refuses)
 │   ├── llm_judge.py        # native httpx rubric (or promptfoo subprocess)
-│   └── agentic.py          # inspect-ai primary, terminal-bench best-effort
+│   ├── agentic.py          # inspect-ai primary, terminal-bench best-effort
+│   ├── sauce.py            # house-blend mixed workload (chat ladder + sessions)
+│   ├── chat_load.py        # sauce chat phase helper
+│   ├── session.py          # sauce session phase helper
+│   ├── chat_http.py       # shared /v1/chat/completions + SSE TTFT
+│   ├── perf.py             # TTFT/TPOT/prefill/decode rates + cached tokens
+│   └── kv_metrics.py       # Prometheus KV-cache % scrape (best-effort)
+├── workloads/
+│   ├── tokens.py          # 4-chars-per-token estimate + deterministic padding
+│   ├── chat_catalog.py    # 31 unique (system, task) pairs
+│   └── session_catalog.py # coding-agent system prompt + 16 sessions × 12 follow-ups
 ├── tools/
 │   └── convert_kl_logits.py  # one-time torch.load(f_*.fp16) → safetensors + manifest.json
 ├── report.py               # write_summary (summary.csv + summary.json + README.md)
 └── compare.py              # compare_results (delta.csv + delta.md)
 
-recipes/                    # YAML recipe library (4 shipped)
+recipes/                    # YAML recipe library (5 shipped)
 tests/
 ├── conftest.py             # top-level pytest fixtures
 ├── test_recipe.py          # schema tests (incl. HardwareSection)
@@ -89,6 +100,7 @@ tests/
 ├── test_cli.py, test_compare.py, test_report.py    # integration tests
 ├── runner/                 # endpoint + serve + llm_perf + vllm_bench tests
 ├── scoring/                # per-scorer tests
+├── workloads/             # sauce chat/session catalogs + token padding tests
 └── fixtures/               # canned outputs (e.g., vllm_bench stdout sample)
 ```
 
@@ -325,10 +337,10 @@ The CLI parses `lmx`'s stdout with a regex (`https?://[^\s]*?/speed-tests/([A-Za
 
 ## 11. Validation status (v1)
 
-- 250 tests passing (test_setup.py + test_cli.py bs setup/init --hardware added)
+- 337 tests passing (kind=sauce house-blend mixed workload + TTFT/TPOT/prefill/decode/KV tracking)
 - ruff + basedpyright strict: clean
-- 4 recipes shipped (gfx1030 production + cross-platform perplexity + KLD), all with `hardware:` + `quantization:` blocks
-- CI runs on `ubuntu-latest` (CPU-only) via `.github/workflows/ci.yml`
+- 5 recipes shipped (gfx1030 production + cross-platform perplexity + KLD + sauce house-blend), all with `hardware:` + `quantization:` blocks
+- CI runs pytest and lint as separate jobs on `ubuntu-latest` (CPU-only) via `.github/workflows/ci.yml`
 - `bs submit` tested with a fake-lmx bash script that records argv and prints synthetic output — no `lmx` binary required in CI
 - `bs setup` tested with monkeypatched `shutil.which` + fake-lmx; the GPU-detection torch fallback uses a `_Torch` mock
 - **GPU smoke deferred**: this v1 was built while real GPUs were busy with bug investigations. Real-hardware validation is a separate session.

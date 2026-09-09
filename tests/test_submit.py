@@ -263,16 +263,22 @@ def test_submit_no_output_tok_s_raises(
 # ----- CLI -----
 
 
-def test_cli_submit_help() -> None:
+def test_cli_submit_help(
+    monkeypatch: pytest.MonkeyPatch, strip_ansi: Callable[[str], str]
+) -> None:
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "80")
     result = runner.invoke(app, ["submit", "--help"])
     assert result.exit_code == 0
-    assert "--lmx-bin" in result.output
-    assert "--endpoint" in result.output
-    assert "--dry-run" in result.output
-    assert "--api-key" not in result.output, (
+    help_text = strip_ansi(result.output)
+    assert "--lmx-bin" in help_text
+    assert "--endpoint" in help_text
+    assert "--dry-run" in help_text
+    assert "--api-key" not in help_text, (
         "lmx handles auth; --api-key was removed in the shell-out rewrite"
     )
-    assert "lmx" in result.output
+    assert "lmx" in help_text
 
 
 def test_cli_submit_missing_dir(fake_lmx: Path) -> None:

@@ -43,11 +43,20 @@ class TestMetricDirection:
         assert _metric_direction("judge_score") == "higher_better"
         assert _metric_direction("successful") == "higher_better"
         assert _metric_direction("agentic_accuracy") == "higher_better"
+        assert _metric_direction("session_success_rate") == "higher_better"
+        assert _metric_direction("session_turns") == "higher_better"
+        assert _metric_direction("input_tok_s") == "higher_better"
+        assert _metric_direction("prefill_tok_s") == "higher_better"
+        assert _metric_direction("decode_tok_s") == "higher_better"
+        assert _metric_direction("session_prefill_tok_s") == "higher_better"
+        assert _metric_direction("session_decode_tok_s") == "higher_better"
 
     def test_metric_direction_lower_better(self) -> None:
         assert _metric_direction("ttft_mean_ms") == "lower_better"
         assert _metric_direction("ttft_p99_ms") == "lower_better"
         assert _metric_direction("tpot_median_ms") == "lower_better"
+        assert _metric_direction("session_ttft_mean_ms") == "lower_better"
+        assert _metric_direction("session_tpot_mean_ms") == "lower_better"
         assert _metric_direction("duration_s") == "lower_better"
         assert _metric_direction("kl_divergence") == "lower_better"
         assert _metric_direction("perplexity_wikitext") == "lower_better"
@@ -61,6 +70,9 @@ class TestMetricDirection:
         assert _metric_direction("started_at") == "neutral"
         assert _metric_direction("finished_at") == "neutral"
         assert _metric_direction("peak_output_tok_s") == "neutral"
+        assert _metric_direction("kv_cache_perc") == "neutral"
+        assert _metric_direction("cached_tokens") == "neutral"
+        assert _metric_direction("session_kv_cache_perc") == "neutral"
 
     def test_is_regression_directional(self) -> None:
         """_is_regression flags only movement in the metric's bad direction."""

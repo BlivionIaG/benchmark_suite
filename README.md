@@ -8,7 +8,7 @@ Declarative benchmarking and quality scoring for OpenAI-compatible LLM endpoints
 
 A CLI tool (`bs`) that runs reproducible benchmarks against any OpenAI-compatible HTTP endpoint — vLLM, llama.cpp server, TGI, OpenAI API — and posts the results to [localmaxxing.com](https://www.localmaxxing.com) (a public inference leaderboard with structured hardware/software/model metadata).
 
-Five scorers shipped:
+Six scorers shipped:
 
 | Scorer | What it measures | Tool |
 |---|---|---|
@@ -17,6 +17,7 @@ Five scorers shipped:
 | `kld` | per-token KL divergence vs reference distribution | custom top-k KL (memmap'd safetensors cache or llm-perf logprobs) |
 | `llm_judge` | 0–10 quality score from a judge LLM | httpx (native, no Node) or promptfoo |
 | `agentic` | task pass rate (inspect-ai) or terminal tasks (experimental) | inspect-ai / terminal-bench |
+| `sauce` | house-blend mixed workload (chat ladder + growing coding sessions) | native httpx — original to this suite |
 
 ## Install
 
@@ -273,6 +274,7 @@ quantization: W4A16-G32
 | `recipes/qwen36-35b-a3b-fp16-tp4.yaml` | MoE FP16 reference — baseline for quantization comparison |
 | `recipes/perplexity-compare.yaml` | Cross-platform wikitext perplexity against any external endpoint |
 | `recipes/kld-vs-fp16-reference.yaml` | KLD divergence vs a converted fp16 reference cache |
+| `recipes/sauce.yaml` | House-blend mixed workload — diverse concurrent chat plus growing coding-agent sessions |
 
 `backend.type: external` recipes never spawn a server — `bs run` probes the endpoint and runs scorers only. Point `endpoint.url` at whatever is already running. Use `hardware.vendor: other` and an empty model name in these recipes if you're scoring an external service without a known GPU.
 
@@ -358,6 +360,42 @@ scoring:
 ```
 
 `terminal-bench` requires Docker on the host and is best-effort — failures are surfaced in the report.
+
+### sauce
+
+House-blend mixed workload original to this suite — not a wrapper around llm-perf, inspect-ai, or promptfoo. One kind, two phases, both on `/v1/chat/completions`.
+
+**Chat ladder.** 31 unique (system prompt, task) pairs. The ladder is **16 + 8 + 4 + 2 + 1**: sixteen distinct prompts fire together, then eight *new* ones at concurrency 8, and so on. The same 31 tasks run at two sizes.
+
+**Coding sessions.** One shared Pi-style coding-agent system prompt, 16 distinct coding tasks, then 12 follow-ups (add a feature, failing tests, bugfix, refactor, …). Context grows toward `min(max_context_tokens, resources.max_model_len)` so an 8k window does fewer turns than a 200k window.
+
+**Latency + KV.** Sauce measures TTFT, TPOT, prefill tok/s, and decode tok/s on every chat request and every session turn (streaming required for a real decode split). Cached tokens come from `usage` when the server reports them. KV-cache % is sampled from Prometheus `GET /metrics` after each chat wave and session turn (vLLM `gpu_cache_usage_perc` and friends; 404 → omitted). Timeseries land in `artifacts/sauce_timeseries.json`. Set `kv_metrics: false` to skip the scrape.
+
+```yaml
+scoring:
+  - kind: sauce
+    kv_metrics: true
+    chat:
+      ladder: [16, 8, 4, 2, 1]
+      suites:
+        - {name: short, input_tokens: 1024, output_tokens: 512}
+        - {name: long, input_tokens: 16384, output_tokens: 1024}
+      stream: true
+    session:
+      max_context_tokens: 200000
+      n_sessions: 16
+      output_tokens: 1024
+      output_reserve_tokens: 2048
+      stream: true
+```
+
+Disable a phase with `enabled: false`. Input length is padded to the target with deterministic background text (`4` characters ≈ `1` token). A chat suite that cannot fit in `resources.max_model_len` is skipped. No extra binaries — httpx only.
+
+Point `recipes/sauce.yaml` at any OpenAI-compatible server:
+
+```bash
+uv run bs run recipes/sauce.yaml
+```
 
 ## CLI Commands
 

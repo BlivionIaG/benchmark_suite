@@ -11,9 +11,11 @@ from benchmark_suite.scoring.metadata_collector import (
     collect_model_info,
     collect_software,
 )
+from benchmark_suite.scoring.sauce import SauceScorerImpl
 from benchmark_suite.scoring.throughput import ThroughputScorerImpl
 
 __all__ = [
+    "SauceScorerImpl",
     "ScoreRecord",
     "ScoreStatus",
     "Scorer",

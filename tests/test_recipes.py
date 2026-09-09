@@ -1,7 +1,7 @@
 """Tests for shipped recipes — every recipes/*.yaml must load via load_recipe.
 
-These tests are the contract for the four reference recipes shipped in the
-repo: they must be valid YAML, load into a Recipe, stay uniquely named, and
+These tests are the contract for the shipped recipes in
+`recipes/`: they must be valid YAML, load into a Recipe, stay uniquely named, and
 carry the sections the runner relies on (meta, backend, bench.load, scoring).
 """
 from __future__ import annotations
@@ -14,6 +14,7 @@ from benchmark_suite.recipe import (
     KLDScorer,
     PerplexityScorer,
     Recipe,
+    SauceScorer,
     ThroughputScorer,
     load_recipe,
 )
@@ -87,3 +88,21 @@ def test_kld_recipe_specifics() -> None:
     assert kld, "kld-vs-fp16-reference must include a kld scorer"
     assert kld[0].source == "logits_dir"
     assert kld[0].vocab_check is True
+
+
+def test_sauce_recipe_specifics() -> None:
+    r = _recipe("sauce")
+    assert r.backend.type == "external"
+    assert r.resources.max_model_len == 200000
+    kinds = [s.kind for s in r.bench.scoring]
+    assert kinds == ["sauce"]
+    sauce = next(s for s in r.bench.scoring if isinstance(s, SauceScorer))
+    assert sauce.chat.ladder == [16, 8, 4, 2, 1]
+    assert [(s.name, s.input_tokens, s.output_tokens) for s in sauce.chat.suites] == [
+        ("short", 1024, 512),
+        ("long", 16384, 1024),
+    ]
+    assert sauce.session.n_sessions == 16
+    assert sauce.session.max_context_tokens == 200000
+    assert r.quantization == "FP16"
+
